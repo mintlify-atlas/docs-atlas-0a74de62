@@ -1,0 +1,181 @@
+---
+title: Game Module Overview
+description: Architecture of the server-side game module in Quake III Arena, including initialization, the main frame loop, and the entity/client lifecycle.
+---
+
+The game module is a dynamically loaded library (`qagame`) that runs on the server. It has exclusive authority over game rules, entity logic, scoring, and physics arbitration. Clients never run game code directly — they run the parallel `cgame` module which mirrors state sent by the server.
+
+## Module interface
+
+The server communicates with the game module through a numeric trap interface (`gameImport_t`) rather than direct function calls. The game module exports a small set of entry points identified by `gameExport_t`:
+
+```c
+typedef enum {
+    GAME_INIT,                   // G_InitGame(levelTime, randomSeed, restart)
+    GAME_SHUTDOWN,
+    GAME_CLIENT_CONNECT,         // ClientConnect(clientNum, firstTime, isBot)
+    GAME_CLIENT_BEGIN,           // ClientBegin(clientNum)
+    GAME_CLIENT_USERINFO_CHANGED,
+    GAME_CLIENT_DISCONNECT,
+    GAME_CLIENT_COMMAND,         // ClientCommand(clientNum)
+    GAME_CLIENT_THINK,           // ClientThink(clientNum)
+    GAME_RUN_FRAME,              // G_RunFrame(levelTime)
+    GAME_CONSOLE_COMMAND,
+    BOTAI_START_FRAME
+} gameExport_t;
+```
+
+## Initialization — `G_InitGame`
+
+Called once per map load with the current level time, a random seed, and a restart flag. Located in `game/g_main.c`:
+
+<Steps>
+  <Step title="Register cvars">
+    `G_RegisterCvars()` binds all `vmCvar_t` variables (g_gametype, g_fraglimit, g_timelimit, g_gravity, g_speed, g_knockback, etc.) to their server cvar values.
+  </Step>
+  <Step title="Clear state">
+    The `level` global (`level_locals_t`) and both entity and client arrays are zeroed. `level.time` and `level.startTime` are set to `levelTime`.
+  </Step>
+  <Step title="Locate game data">
+    `trap_LocateGameData()` informs the server where the entity array and player state array live so it can read them directly without going through the game API.
+  </Step>
+  <Step title="Spawn entities">
+    `G_SpawnEntitiesFromString()` parses the BSP entity lump and calls spawn functions for each `classname`.
+  </Step>
+  <Step title="Team and item setup">
+    `G_FindTeams()` links team entities, `G_CheckTeamItems()` validates flag/obelisk presence for team games, and `SaveRegisteredItems()` caches the item config strings.
+  </Step>
+  <Step title="Bot AI">
+    If `bot_enable` is set, `BotAISetup()`, `BotAILoadMap()`, and `G_InitBots()` initialise the bot library.
+  </Step>
+</Steps>
+
+## Main frame — `G_RunFrame`
+
+`G_RunFrame( int levelTime )` in `g_main.c` is called by the server every frame (100 ms by default, `FRAMETIME`):
+
+```c
+void G_RunFrame( int levelTime ) {
+    // update level.time, level.previousTime
+    G_UpdateCvars();
+
+    // iterate all active entities
+    for ( i = 0; i < level.num_entities; i++ ) {
+        if ( ent->s.eType == ET_MISSILE )  { G_RunMissile( ent ); continue; }
+        if ( ent->s.eType == ET_ITEM )     { G_RunItem( ent );    continue; }
+        if ( ent->s.eType == ET_MOVER )    { G_RunMover( ent );   continue; }
+        if ( i < MAX_CLIENTS )             { G_RunClient( ent );  continue; }
+        G_RunThink( ent );
+    }
+
+    // final per-client fixups
+    for ( i = 0; i < level.maxclients; i++ )
+        ClientEndFrame( ent );
+
+    CheckTournament();
+    CheckExitRules();
+    CheckTeamStatus();
+    CheckVote();
+}
+```
+
+## Entity lifecycle
+
+Every object in the game world is a `gentity_t`. The lifecycle is:
+
+```
+G_Spawn()            allocate and zero a slot
+  └─ Spawn function  set fields from spawn key/values
+     └─ think()      first think, may link entity
+        └─ touch()   called when another entity touches
+        └─ use()     called when activated (trigger, button)
+        └─ pain()    called on taking damage
+        └─ die()     called when health reaches 0
+G_FreeEntity()       return slot to pool
+```
+
+Entities with `neverFree = qtrue` (body queue corpses) are only unlinked from the world, not returned to the pool.
+
+## The `gentity_t` struct
+
+Defined in `game/g_local.h`. Simplified:
+
+```c
+struct gentity_s {
+    entityState_t  s;             // transmitted to clients
+    entityShared_t r;             // shared with server (bbox, flags)
+
+    struct gclient_s *client;     // non-NULL for player entities
+    qboolean    inuse;
+    char       *classname;
+    int         flags;            // FL_GODMODE, FL_NOTARGET, etc.
+    int         health;
+    qboolean    takedamage;
+
+    // callbacks
+    void (*think)(gentity_t *self);
+    void (*touch)(gentity_t *self, gentity_t *other, trace_t *trace);
+    void (*use)(gentity_t *self, gentity_t *other, gentity_t *activator);
+    void (*pain)(gentity_t *self, gentity_t *attacker, int damage);
+    void (*die)(gentity_t *self, gentity_t *inflictor,
+                gentity_t *attacker, int damage, int mod);
+
+    int         nextthink;        // level.time when think is called
+    gitem_t    *item;             // for pickup items
+    // mover state, targeting chains, physics fields ...
+};
+```
+
+## The `gclient_t` struct
+
+Client-specific data beyond the entity:
+
+```c
+struct gclient_s {
+    playerState_t     ps;          // communicated by server — MUST be first
+    clientPersistant_t pers;       // survives respawn
+    clientSession_t    sess;       // survives map change
+
+    int     buttons, oldbuttons, latched_buttons;
+    int     damage_armor, damage_blood, damage_knockback;
+    vec3_t  damage_from;
+    int     lastkilled_client;
+    int     respawnTime;
+    int     lastKillTime;          // for "Excellent" reward tracking
+    qboolean fireHeld;             // grapple hook
+    gentity_t *hook;
+};
+```
+
+## Key cvars
+
+| Cvar | Default | Description |
+|---|---|---|
+| `g_gametype` | `0` | Game type (see [Game Types](/engine/game/game-types)) |
+| `g_fraglimit` | `20` | Frags to win FFA/tournament |
+| `g_timelimit` | `0` | Minutes per map (0 = no limit) |
+| `g_capturelimit` | `8` | Flag captures to win CTF |
+| `g_gravity` | `800` | World gravity in units/s² |
+| `g_speed` | `320` | Base player movement speed |
+| `g_knockback` | `1000` | Knockback force multiplier |
+| `g_quadfactor` | `3` | Quad damage multiplier |
+| `g_weaponrespawn` | `5` | Weapon respawn time (seconds) |
+| `g_forcerespawn` | `20` | Auto-respawn after this many seconds |
+| `g_friendlyFire` | `0` | Enable team damage |
+
+## Level state
+
+All per-map state lives in the `level_locals_t` global `level`:
+
+```c
+typedef struct {
+    gclient_t  *clients;               // [maxclients]
+    gentity_t  *gentities;
+    int         num_entities;
+    int         time, previousTime, startTime;
+    int         teamScores[TEAM_NUM_TEAMS];
+    int         numPlayingClients;
+    int         sortedClients[MAX_CLIENTS]; // sorted by score
+    // voting, intermission, spawn vars ...
+} level_locals_t;
+```

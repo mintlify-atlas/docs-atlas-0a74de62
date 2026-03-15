@@ -1,0 +1,145 @@
+---
+title: Building on Windows
+description: How to compile Quake III Arena and its tools on Windows using Visual C++ 2003 (VC7), and how to build the QVM modules with lcc and q3asm.
+---
+
+## Requirements
+
+- **Visual C++ 2003** (VC7) / Visual Studio .NET 2003
+- `lcc.exe`, `q3cpp.exe`, `q3rcc.exe`, `q3asm.exe` on `PATH` to build QVM modules (precompiled binaries are provided in `lcc/bin/` and `code/win32/mod-sdk-setup/bin/`)
+
+---
+
+## Compiling the engine and game DLLs
+
+<Steps>
+  <Step title="Open the solution">
+    Open `code/quake3.sln` in Visual Studio .NET 2003.
+  </Step>
+  <Step title="Select a build configuration">
+    Choose **Debug** or **Release** from the configuration dropdown.
+  </Step>
+  <Step title="Build">
+    Press **F7** or choose **Build → Build Solution**.
+  </Step>
+</Steps>
+
+### Output files
+
+| File | Description |
+|------|-------------|
+| `quake3.exe` | Engine executable |
+| `cgamex86.dll` | Client-game module (native) |
+| `qagamex86.dll` | Server-game module (native) |
+| `uix86.dll` | UI module (native) |
+
+<Note>
+The native `.dll` modules and the `.qvm` modules are interchangeable at runtime. The engine loads whichever is present; `.qvm` is preferred for mod distribution because it is platform-neutral.
+</Note>
+
+---
+
+## Compiling Q3Radiant
+
+<Steps>
+  <Step title="Open the Radiant solution">
+    Open `q3radiant/Radiant.sln` in Visual Studio .NET 2003.
+  </Step>
+  <Step title="Build">
+    Press **F7**. The output is `Radiant.exe`.
+  </Step>
+</Steps>
+
+---
+
+## Compiling the QVM modules
+
+QVM modules are built by running batch files in each module's source directory. The batch files invoke `lcc` for each `.c` file and then `q3asm` to link the resulting `.asm` files.
+
+### Setting up PATH
+
+Add the directory containing the LCC and q3asm tools to your `PATH`:
+
+```bat
+set PATH=%PATH%;C:\path\to\lcc\bin
+```
+
+The required executables are:
+
+| Executable | Role |
+|------------|------|
+| `lcc.exe` | LCC compiler driver |
+| `q3cpp.exe` | C preprocessor |
+| `q3rcc.exe` | QVM code generator |
+| `q3asm.exe` | QVM assembler / linker |
+
+### Running the build scripts
+
+<Tabs>
+  <Tab title="game (qagame.qvm)">
+    ```bat
+    cd code\game
+    game.bat
+    ```
+    Output: `code\game\vm\qagame.qvm`
+  </Tab>
+  <Tab title="cgame (cgame.qvm)">
+    ```bat
+    cd code\cgame
+    cgame.bat
+    ```
+    Output: `code\cgame\vm\cgame.qvm`
+  </Tab>
+  <Tab title="ui (ui.qvm)">
+    ```bat
+    cd code\q3_ui
+    q3_ui.bat
+    ```
+    Output: `code\q3_ui\vm\ui.qvm` (or `ui.qvm` depending on the script)
+  </Tab>
+</Tabs>
+
+### What the batch files do
+
+Each `.bat` file follows the same pattern (from `code/game/game.bat`):
+
+```bat
+rem make sure we have a safe environment
+set LIBRARY=
+set INCLUDE=
+
+mkdir vm
+cd vm
+set cc=lcc -DQ3_VM -S -Wf-target=bytecode -Wf-g -I..\..\cgame -I..\..\game -I..\..\ui %1
+
+%cc% ../g_main.c
+%cc% ../g_syscalls.c
+...
+
+q3asm -f ../game
+```
+
+After compilation copy the `.qvm` files to your game's `baseq3/vm/` directory:
+
+```bat
+copy code\game\vm\qagame.qvm "C:\Quake3\baseq3\vm\"
+copy code\cgame\vm\cgame.qvm "C:\Quake3\baseq3\vm\"
+copy code\q3_ui\vm\ui.qvm    "C:\Quake3\baseq3\vm\"
+```
+
+<Warning>
+Clearing `LIBRARY` and `INCLUDE` at the start of the batch file prevents the MSVC runtime headers from being seen by lcc, which would cause errors. Do not remove those lines.
+</Warning>
+
+---
+
+## Team Arena variants
+
+The Team Arena (mission pack) QVM modules use separate `.q3asm` scripts that output to `missionpack/vm/` and define `-DMISSIONPACK`:
+
+```bat
+rem Inside code\game
+game.bat -DMISSIONPACK
+```
+
+The `game_ta.q3asm` linker script sets the output path to `\quake3\missionpack\vm\qagame`.

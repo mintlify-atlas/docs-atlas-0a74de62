@@ -1,0 +1,172 @@
+---
+title: LCC compiler
+description: The retargetable C compiler used to compile Q3A game code to QVM assembly. Covers the compilation pipeline, binaries, flags, and limitations.
+---
+
+LCC is a retargetable C compiler originally written by Chris Fraser and David Hanson (version 4.1, described in *A Retargetable C Compiler: Design and Implementation*, Addison-Wesley 1995). Id Software added a custom backend that targets the Quake III Virtual Machine instruction set instead of a native CPU, making it the front half of the QVM toolchain.
+
+Source: `lcc/`
+
+---
+
+## Binaries
+
+Precompiled Windows binaries ship in `lcc/bin/`:
+
+| Binary | Role |
+|--------|------|
+| `lcc.exe` | Driver — orchestrates the full pipeline |
+| `q3cpp.exe` | C preprocessor |
+| `q3rcc.exe` | Q3A retargetable code generator (emits QVM assembly) |
+
+On Linux the driver is called `q3lcc`. The cons build system expects the tools on `PATH` or under `./qvmtools/`.
+
+<Note>
+q3asm is a separate tool (see the [q3asm page](/tools/q3asm)). LCC produces `.asm` files; q3asm links them into `.qvm` bytecode.
+</Note>
+
+---
+
+## Compilation pipeline
+
+Each `.c` source file passes through three stages before reaching q3asm:
+
+```
+.c
+ └─ q3cpp  (C preprocessor)          →  preprocessed C
+      └─ q3rcc  (code generator)      →  .asm  (QVM assembly)
+           └─ q3asm  (assembler/linker) →  .qvm  (bytecode)
+```
+
+The driver (`lcc` / `q3lcc`) runs `q3cpp` and `q3rcc` automatically; you only call `q3asm` separately at the end to link all `.asm` files together.
+
+---
+
+## Compiler flags
+
+The flags used in the official build scripts:
+
+| Flag | Meaning |
+|------|---------|
+| `-DQ3_VM` | Preprocessor define; distinguishes QVM builds from native builds |
+| `-S` | Stop after code generation — output `.asm`, do not assemble |
+| `-Wf-target=bytecode` | Select the QVM bytecode backend in `q3rcc` |
+| `-Wf-g` | Include debug information in the assembly output |
+| `-I<dir>` | Add an include search path |
+
+---
+
+## Compiling a single file
+
+<Tabs>
+  <Tab title="Linux / macOS">
+    ```bash
+    q3lcc -DQ3_VM -S -Wf-target=bytecode -Wf-g \
+          -I../../cgame -I../../game -I../../q3_ui \
+          ../g_main.c
+    ```
+    This writes `g_main.asm` into the current directory.
+  </Tab>
+  <Tab title="Windows">
+    ```bat
+    lcc -DQ3_VM -S -Wf-target=bytecode -Wf-g -I..\..\cgame -I..\..\game -I..\..\ui g_main.c
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Build scripts
+
+Each QVM module has a ready-made build script that compiles every source file and then invokes q3asm.
+
+### `code/game/game.sh` (Linux)
+
+```bash
+#!/bin/sh
+mkdir -p vm
+cd vm
+
+CC="q3lcc -DQ3_VM -S -Wf-target=bytecode -Wf-g \
+    -I../../cgame -I../../game -I../../q3_ui"
+
+$CC ../g_main.c
+$CC ../g_syscalls.c
+$CC ../bg_misc.c
+$CC ../bg_lib.c
+# ... (all game source files)
+
+q3asm -f ../game
+```
+
+### `code/game/game.bat` (Windows)
+
+```bat
+set cc=lcc -DQ3_VM -S -Wf-target=bytecode -Wf-g -I..\..\cgame -I..\..\game -I..\..\ui %1
+
+%cc% ../g_main.c
+%cc% ../g_syscalls.c
+%cc% ../bg_misc.c
+...
+
+q3asm -f ../game
+```
+
+<Note>
+`lcc.exe`, `q3cpp.exe`, `q3rcc.exe`, and `q3asm.exe` must all be on `PATH` before running the `.bat` files. Precompiled binaries are provided in `lcc/bin/` and `code/win32/mod-sdk-setup/bin/`.
+</Note>
+
+---
+
+## Standard library replacement: bg_lib.c
+
+The QVM has no operating-system interface and no C standard library. `code/game/bg_lib.c` provides BSD-licensed replacements for the subset of libc functions needed by game code:
+
+```
+strlen  strcasecmp  tolower  strcat  strncpy
+strcmp  strcpy  strchr  vsprintf
+memcpy  memset  rand
+atoi  atof  abs
+floor  fabs  tan  atan  sqrt  log  cos  sin  atan2
+```
+
+`bg_lib.c` is compiled into the QVM but **not** into native `.so`/`.dll` builds (which link against the system libc instead). The `Conscript` build script distinguishes the two cases:
+
+```perl
+# only for VM
+@VM_FILES = qw(
+  bg_lib.c
+  g_syscalls.asm
+);
+```
+
+---
+
+## Limitations
+
+- **No standard library.** All libc functions must be provided by `bg_lib.c` or system-call trap stubs.
+- **No function pointers to external code.** QVM calls outside the VM boundary go through the syscall trap mechanism, not raw pointers.
+- **C89 / C90 dialect.** LCC 4.1 targets C89; C99 features (inline, `//` comments, VLAs, etc.) are not supported.
+- **No native floating-point on all targets.** Float operations are emulated at the bytecode level via `OP_CVIF` / `OP_CVFI` and the float opcodes.
+- **`atoi` redefined.** `q3asm.c` redefines `atoi` to `strtoul` to work around MSVC behaviour — be careful when porting.
+
+---
+
+## Building LCC itself
+
+<Tabs>
+  <Tab title="Windows">
+    ```bat
+    cd lcc
+    buildnt.bat
+    ```
+    Or open the MSVC project files in `lcc/msdev/`.
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    cd lcc
+    make
+    ```
+    Requires gcc and standard POSIX build tools.
+  </Tab>
+</Tabs>

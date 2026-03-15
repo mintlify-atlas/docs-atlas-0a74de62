@@ -1,0 +1,480 @@
+---
+title: "Entity reference"
+description: "Reference for Quake III Arena map entities: spawn functions from g_spawn.c, key-value fields, and usage for all major entity types."
+---
+
+Map entities are defined in the BSP entity lump as `{ key value ... }` blocks. When the server loads a map, `G_SpawnEntitiesFromString` in `code/game/g_spawn.c` parses each block and calls the corresponding spawn function.
+
+All entities accept the [common fields](#common-fields) listed below. Entity-specific fields are documented in each section.
+
+## Common fields
+
+These key-value pairs are recognized by the field parser in `G_ParseField` for all entities:
+
+| Key | Type | Description |
+|---|---|---|
+| `classname` | string | Entity type identifier. Must match a spawn function name. |
+| `origin` | vector | World-space position `"x y z"`. |
+| `angles` | vector | Orientation as `"pitch yaw roll"`. |
+| `angle` | float | Shorthand for yaw only (sets `angles[1]`). |
+| `model` | string | Path to a model to display. |
+| `model2` | string | Secondary model path. |
+| `spawnflags` | int | Bitmask of entity-specific flags. |
+| `target` | string | `targetname` of entity to fire when this entity is activated. |
+| `targetname` | string | Name used by other entities to target this one. |
+| `message` | string | Text string used by various entities. |
+| `team` | string | Team name; entities with matching team fields are linked as a group. |
+| `speed` | float | Movement speed (movers, projectiles). |
+| `wait` | float | Delay before re-triggering, in seconds. |
+| `random` | float | Random variation added to `wait`. |
+| `count` | int | Usage count (trigger_multiple, etc.). |
+| `health` | int | Entity health points. |
+| `dmg` | int | Damage value (`damage` field in `gentity_t`). |
+
+### Conditional spawn keys
+
+| Key | Description |
+|---|---|
+| `notsingle` | `1` = do not spawn in `GT_SINGLE_PLAYER` |
+| `notteam` | `1` = do not spawn in team game modes (`GT_TEAM` and above) |
+| `notfree` | `1` = do not spawn in non-team modes |
+| `gametype` | Comma-separated list of game type names (`ffa`, `tournament`, `team`, `ctf`, etc.) this entity appears in |
+
+---
+
+## worldspawn
+
+**Spawn function**: `SP_worldspawn` in `g_spawn.c`
+
+Every map must contain exactly one `worldspawn`. It is not a movable entity; it is the static world geometry container. Its keys set global level properties.
+
+```
+{
+"classname" "worldspawn"
+"music" "music/sonic4.wav"
+"gravity" "800"
+"message" "Welcome to my map!"
+}
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `message` | `""` | Text sent to clients during connection via `CS_MESSAGE` config string. |
+| `music` | `""` | Background music track path. Set via `CS_MUSIC` config string. |
+| `gravity` | `"800"` | Sets `g_gravity` CVar for this map. Overrides any existing value. |
+| `enableDust` | `"0"` | Enable dust particle effects (Team Arena). |
+| `enableBreath` | `"0"` | Enable breath particle effects in cold areas (Team Arena). |
+
+---
+
+## Player spawn points
+
+### info_player_start
+
+**Spawn function**: `SP_info_player_start`
+
+Single-player game start position and co-op/FFA fallback spawn.
+
+| Key | Description |
+|---|---|
+| `angle` | Facing direction (yaw) on spawn. |
+
+### info_player_deathmatch
+
+**Spawn function**: `SP_info_player_deathmatch`
+
+FFA and deathmatch player spawn point. Multiple instances are placed around the map; the game picks one using a spawn algorithm that avoids placing players near enemies.
+
+| Key | Description |
+|---|---|
+| `angle` | Facing direction on spawn. |
+| `spawnflags` | `1` = initial spawn point (preferred for first spawn). |
+
+### info_player_intermission
+
+**Spawn function**: `SP_info_player_intermission`
+
+Camera position shown during the end-of-match scoreboard. If `target` is set, the camera looks toward the targeted entity instead of using `angles`.
+
+| Key | Description |
+|---|---|
+| `angles` | Camera orientation. |
+| `target` | Entity to look at. |
+
+### team_CTF_redspawn / team_CTF_bluespawn
+
+**Spawn functions**: `SP_team_CTF_redspawn`, `SP_team_CTF_bluespawn`
+
+CTF-specific team spawn points. The engine selects from these when `g_gametype` is `GT_CTF` or higher.
+
+| Key | Description |
+|---|---|
+| `angle` | Facing direction on spawn. |
+
+---
+
+## Items and pickups
+
+Item entities do not have hand-written spawn functions in `g_spawn.c`. Instead, `G_CallSpawn` matches the entity's `classname` against the `bg_itemlist[]` array defined in `code/game/bg_misc.c` and calls `G_SpawnItem`.
+
+All item entities accept:
+
+| Key | Description |
+|---|---|
+| `spawnflags` | `1` = suspended (floats, no drop to floor), `2` = no timed respawn after pickup |
+| `wait` | Respawn delay override in seconds. `-1` = never respawn. |
+| `count` | Amount granted (overrides item default for ammo). |
+| `team` | Link multiple items together (only one active at a time). |
+
+### Health items
+
+| Classname | Description |
+|---|---|
+| `item_health_small` | +5 health (yellow) |
+| `item_health` | +25 health (yellow) |
+| `item_health_large` | +50 health (yellow, mega-sized) |
+| `item_health_mega` | +100 health (blue, up to 200 max) |
+
+### Armor items
+
+| Classname | Description |
+|---|---|
+| `item_armor_shard` | +5 armor (green shard) |
+| `item_armor_combat` | +50 armor (yellow combat armor) |
+| `item_armor_body` | +100 armor (red body armor) |
+
+### Weapon pickups
+
+| Classname | Weapon |
+|---|---|
+| `weapon_gauntlet` | Gauntlet (`WP_GAUNTLET`) |
+| `weapon_machinegun` | Machine Gun (`WP_MACHINEGUN`) |
+| `weapon_shotgun` | Shotgun (`WP_SHOTGUN`) |
+| `weapon_grenadelauncher` | Grenade Launcher (`WP_GRENADE_LAUNCHER`) |
+| `weapon_rocketlauncher` | Rocket Launcher (`WP_ROCKET_LAUNCHER`) |
+| `weapon_lightning` | Lightning Gun (`WP_LIGHTNING`) |
+| `weapon_railgun` | Railgun (`WP_RAILGUN`) |
+| `weapon_plasmagun` | Plasma Gun (`WP_PLASMAGUN`) |
+| `weapon_bfg` | BFG10K (`WP_BFG`) |
+| `weapon_grapplinghook` | Grappling Hook (`WP_GRAPPLING_HOOK`) |
+
+### Ammo pickups
+
+| Classname | Description |
+|---|---|
+| `ammo_bullets` | Machine gun ammo |
+| `ammo_shells` | Shotgun shells |
+| `ammo_grenades` | Grenades |
+| `ammo_rockets` | Rockets |
+| `ammo_lightning` | Lightning cells |
+| `ammo_slugs` | Railgun slugs |
+| `ammo_cells` | Plasma cells |
+| `ammo_bfg` | BFG ammo |
+
+### Powerups
+
+| Classname | Description |
+|---|---|
+| `item_quad` | Quad Damage: 3× damage multiplier |
+| `item_enviro` | Battle Suit: environmental protection and splash damage immunity |
+| `item_haste` | Haste: doubled movement speed |
+| `item_invis` | Invisibility |
+| `item_regen` | Regeneration: +15 health per second |
+| `item_flight` | Flight |
+
+### Holdable items
+
+| Classname | Description |
+|---|---|
+| `holdable_teleporter` | Personal teleporter one-shot use |
+| `holdable_medkit` | Medkit: restore health to 100 |
+
+---
+
+## Trigger entities
+
+### trigger_hurt
+
+**Spawn function**: `SP_trigger_hurt`
+
+A brush entity that deals damage to any player touching it.
+
+| Key | Default | Description |
+|---|---|---|
+| `dmg` | `5` | Damage per activation. |
+| `spawnflags` | `0` | `1` = silent (no pain sound), `2` = slow (damage once per second instead of per frame), `4` = no protection from Battle Suit |
+
+### trigger_teleport
+
+**Spawn function**: `SP_trigger_teleport`
+
+A brush entity that teleports touching players to the entity targeted by `target`. The destination entity is typically a `misc_teleporter_dest` (see below).
+
+| Key | Description |
+|---|---|
+| `target` | `targetname` of the teleport destination. |
+| `spawnflags` | `1` = spectators not teleported |
+
+### trigger_push
+
+**Spawn function**: `SP_trigger_push`
+
+Jump pad trigger. Launches the player toward the target entity at a trajectory calculated to reach the target.
+
+| Key | Description |
+|---|---|
+| `target` | `targetname` of the landing target (`info_notnull` or `target_position`). |
+
+### trigger_multiple
+
+**Spawn function**: `SP_trigger_multiple`
+
+Fires its `target` when touched by a player. Can be re-triggered after `wait` seconds.
+
+| Key | Default | Description |
+|---|---|---|
+| `wait` | `0.2` | Seconds before the trigger can fire again. |
+| `random` | `0` | Random additional delay. |
+
+### trigger_always
+
+**Spawn function**: `SP_trigger_always`
+
+Fires its `target` once at level load, then removes itself.
+
+---
+
+## Target entities
+
+### target_teleporter
+
+**Spawn function**: `SP_target_teleporter`
+
+When fired, teleports any player in the activating area to this entity's location. Use as the destination for `trigger_teleport`.
+
+| Key | Description |
+|---|---|
+| `targetname` | Name used by a `trigger_teleport` to reference this entity. |
+
+### misc_teleporter_dest
+
+**Spawn function**: `SP_misc_teleporter_dest`
+
+Alternate teleport destination marker. Players arriving here face the entity's `angle` direction.
+
+| Key | Description |
+|---|---|
+| `angle` | Facing direction for the arriving player. |
+
+### target_speaker
+
+**Spawn function**: `SP_target_speaker`
+
+Plays a sound when triggered or continuously at its origin.
+
+| Key | Description |
+|---|---|
+| `noise` | Sound file path to play. |
+| `spawnflags` | `1` = activated by trigger only, `2` = global (no distance attenuation), `4` = looping |
+| `wait` | Minimum seconds between plays. |
+
+### target_print
+
+**Spawn function**: `SP_target_print`
+
+Broadcasts a text message to clients when fired.
+
+| Key | Description |
+|---|---|
+| `message` | Text to print. |
+| `spawnflags` | `1` = red team only, `2` = blue team only, `4` = private to activating player |
+
+### target_delay
+
+**Spawn function**: `SP_target_delay`
+
+Fires its `target` after a delay.
+
+| Key | Description |
+|---|---|
+| `wait` | Delay in seconds. |
+| `random` | Random additional delay. |
+
+### target_relay
+
+**Spawn function**: `SP_target_relay`
+
+Passes a trigger activation through to its own `target`. Used to route triggers or filter by team.
+
+| Key | Description |
+|---|---|
+| `spawnflags` | `1` = red team only, `2` = blue team only, `4` = trigger only once |
+
+### target_kill
+
+**Spawn function**: `SP_target_kill`
+
+Kills the activating entity when fired.
+
+### target_position / info_notnull
+
+**Spawn functions**: `SP_target_position`, `SP_info_notnull`
+
+A positional marker with no visible presence. Used as a destination for jump pads, camera targets, etc.
+
+| Key | Description |
+|---|---|
+| `targetname` | Name for other entities to reference. |
+
+---
+
+## Mover entities
+
+### func_door
+
+**Spawn function**: `SP_func_door`
+
+A brush entity that moves when triggered or when a player touches it.
+
+| Key | Default | Description |
+|---|---|---|
+| `speed` | `400` | Movement speed in units per second. |
+| `wait` | `2` | Seconds before returning to closed position. `-1` = stay open. |
+| `dmg` | `2` | Damage per frame to entities blocking the door. |
+| `angle` | — | Direction the door slides (yaw). Use `angles` for pitch. |
+| `lip` | `8` | Amount of brush left in the closed position. |
+| `health` | `0` | If non-zero, door must be shot to open. |
+| `targetname` | — | If set, door only opens when triggered. |
+| `spawnflags` | `0` | `1` = starts open, `4` = crusher (does not return) |
+
+### func_plat
+
+**Spawn function**: `SP_func_plat`
+
+A brush entity that moves down when a player stands on it, then returns to the top position.
+
+| Key | Default | Description |
+|---|---|---|
+| `speed` | `400` | Movement speed. |
+| `wait` | `1` | Seconds to wait at the bottom before rising. |
+| `height` | — | If set, overrides the travel distance. |
+| `dmg` | `2` | Damage per frame to crushed entities. |
+
+### func_rotating
+
+**Spawn function**: `SP_func_rotating`
+
+A continuously rotating brush entity.
+
+| Key | Default | Description |
+|---|---|---|
+| `speed` | `100` | Rotation speed in degrees per second. |
+| `spawnflags` | `0` | `1` = starts spinning, `2` = Y axis, `4` = X axis (default is Z axis) |
+
+### func_bobbing
+
+**Spawn function**: `SP_func_bobbing`
+
+A brush entity that oscillates up and down.
+
+| Key | Default | Description |
+|---|---|---|
+| `height` | `32` | Amplitude of the bob in units. |
+| `speed` | `4` | Period in seconds for one full cycle. |
+| `phase` | `0` | Phase offset so multiple bobbings desynchronize. |
+
+### func_train
+
+**Spawn function**: `SP_func_train`
+
+A brush entity that follows a series of `path_corner` entities.
+
+| Key | Description |
+|---|---|
+| `target` | `targetname` of the first `path_corner`. |
+| `speed` | Speed between path corners. |
+| `dmg` | Damage to blocking entities. |
+
+### func_static
+
+**Spawn function**: `SP_func_static`
+
+A non-moving brush entity used for visual geometry that needs to be a separate model (glass, grates). Has no game logic.
+
+---
+
+## Miscellaneous entities
+
+### light
+
+**Spawn function**: `SP_light`
+
+A light source used by the `q3map` BSP compiler to generate lightmaps. Has no effect at runtime; it is stripped from the entity lump after compilation.
+
+| Key | Default | Description |
+|---|---|---|
+| `light` | `300` | Light intensity. |
+| `_color` | `"1 1 1"` | RGB light color. |
+| `radius` | — | Override the effective light radius. |
+
+### path_corner
+
+**Spawn function**: `SP_path_corner`
+
+Waypoint for `func_train` paths.
+
+| Key | Description |
+|---|---|
+| `targetname` | Name so a train or previous path corner can target this. |
+| `target` | Next path corner in the chain. |
+| `speed` | Override train speed for the leg ending at this corner. |
+| `wait` | Pause time at this corner. |
+
+### misc_model
+
+**Spawn function**: `SP_misc_model`
+
+Place a static MD3 model in the world. Useful for decorative objects not built into the BSP geometry.
+
+| Key | Description |
+|---|---|
+| `model` | Path to the `.md3` file. |
+| `angles` | Orientation. |
+| `spawnflags` | `1` = use exact bbox from model |
+
+### misc_portal_surface
+
+**Spawn function**: `SP_misc_portal_surface`
+
+A portal camera surface. When rendered, shows the view from a paired `misc_portal_camera`.
+
+| Key | Description |
+|---|---|
+| `target` | `targetname` of the `misc_portal_camera`. |
+
+### misc_portal_camera
+
+**Spawn function**: `SP_misc_portal_camera`
+
+Camera point for a portal surface.
+
+| Key | Description |
+|---|---|
+| `targetname` | Name for a `misc_portal_surface` to reference. |
+| `roll` | Camera roll angle. |
+
+### shooter_rocket / shooter_grenade / shooter_plasma
+
+**Spawn functions**: `SP_shooter_rocket`, `SP_shooter_grenade`, `SP_shooter_plasma`
+
+Fires a projectile in the direction of `angles` when triggered.
+
+| Key | Description |
+|---|---|
+| `angles` | Direction to fire. |
+| `targetname` | Triggered by other entities. |
+| `random` | Random spread on firing direction. |
+
+<Note>
+  The entity list above covers entities present in stock Quake III Arena. Team Arena (Missionpack) adds additional entities for obelisks, harvester targets, and persistent powerup spawners. These are compiled in only when `MISSIONPACK` is defined.
+</Note>

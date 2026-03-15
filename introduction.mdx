@@ -1,0 +1,78 @@
+---
+title: "Quake III Arena — Source Code"
+description: "The GPL source release of id Software's legendary arena shooter engine. Explore the renderer, game logic, bot AI, networking, QVM virtual machine, and tools."
+---
+
+<CardGroup cols={2}>
+  <Card title="Quickstart: Building" icon="hammer" href="/quickstart-building">
+    Compile the engine on Windows, Linux, or macOS from source
+  </Card>
+  <Card title="Repository Layout" icon="folder-tree" href="/repository-layout">
+    Understand how the codebase is organized across modules
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    High-level overview of the engine's modular design
+  </Card>
+  <Card title="QVM Virtual Machine" icon="microchip" href="/architecture/qvm-virtual-machine">
+    The bytecode VM that sandboxes game logic from the engine
+  </Card>
+</CardGroup>
+
+## What is the Quake III Arena source release?
+
+Quake III Arena is a first-person shooter released by id Software in 1999. In 2005, id Software released the full source code under the GNU General Public License v2. This documentation covers the GPL source release, explaining the architecture, systems, and tools that make up the engine.
+
+The codebase is written primarily in C, with a modular architecture that separates the engine core from game logic via a QVM (Quake Virtual Machine) bytecode interface. This design allows mods to replace game logic — weapons, entities, AI, UI — without recompiling the engine itself.
+
+## Engine modules
+
+<CardGroup cols={3}>
+  <Card title="Renderer" icon="eye" href="/engine/renderer/overview">
+    OpenGL hardware-accelerated 3D renderer with BSP worlds, shader system, and dynamic lighting
+  </Card>
+  <Card title="Game Logic" icon="gamepad" href="/engine/game/overview">
+    Server-side game module: entities, weapons, player movement, and game types
+  </Card>
+  <Card title="Client Game" icon="display" href="/engine/cgame/overview">
+    Client-side prediction, HUD drawing, visual effects, and player models
+  </Card>
+  <Card title="Networking" icon="network-wired" href="/engine/networking/overview">
+    Delta-compressed snapshot networking over UDP for client-server play
+  </Card>
+  <Card title="Bot AI" icon="robot" href="/engine/botai/overview">
+    The Botlib AI system with Area Awareness System (AAS) pathfinding
+  </Card>
+  <Card title="Common Systems" icon="gears" href="/engine/common/cvar-system">
+    CVars, filesystem, console commands, and the sound system
+  </Card>
+</CardGroup>
+
+## Tools
+
+<CardGroup cols={2}>
+  <Card title="Q3Radiant" icon="pen-ruler" href="/tools/q3radiant">
+    The Q3Radiant map editor for creating BSP levels
+  </Card>
+  <Card title="q3map" icon="map" href="/tools/q3map">
+    BSP compiler that converts `.map` files to `.bsp` world files
+  </Card>
+  <Card title="q3asm" icon="code" href="/tools/q3asm">
+    Assembler that converts LCC-generated assembly to QVM bytecode
+  </Card>
+  <Card title="LCC Compiler" icon="terminal" href="/tools/lcc-compiler">
+    The retargetable C compiler that targets the QVM architecture
+  </Card>
+</CardGroup>
+
+## Key features
+
+- **QVM sandboxing**: Game, cgame, and UI modules run as bytecode inside the QVM virtual machine, enabling mods without engine recompilation
+- **BSP rendering**: The renderer uses Binary Space Partitioning trees for efficient occlusion and rendering of complex indoor environments
+- **Shader system**: A text-based shader scripting language controls surface appearance, animation, blending, and special effects
+- **Delta-compressed networking**: The server sends only the *difference* between game states each frame, minimizing bandwidth over UDP
+- **AAS pathfinding**: Bots navigate using an Area Awareness System — a precomputed reachability graph that allows sophisticated movement decisions
+- **Cross-platform**: Builds on Windows (MSVC), GNU/Linux (GCC), and macOS
+
+## License
+
+The Quake III Arena source code is released under the [GNU General Public License v2](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html). Certain third-party components (zlib, MD4, JPEG library, ADPCM coder) are included under their own compatible licenses as described in `COPYING.txt`.

@@ -1,0 +1,137 @@
+---
+title: "Introduction to modding"
+description: "Learn how to create mods for Quake III Arena using the QVM module system. Replace game logic, HUD, or menus without touching the engine."
+---
+
+Quake III Arena's GPL source release gives you everything you need to build mods. The engine separates all gameplay code into three interchangeable QVM modules. You can replace any or all of them.
+
+<CardGroup cols={3}>
+  <Card title="qagame.qvm" icon="server">
+    Server-side logic: weapons, items, scoring, AI, and game rules
+  </Card>
+  <Card title="cgame.qvm" icon="display">
+    Client-side rendering: HUD, effects, prediction, and player display
+  </Card>
+  <Card title="ui.qvm" icon="window-restore">
+    Menu system: main menu, options, server browser, and in-game UI
+  </Card>
+</CardGroup>
+
+## How mods work
+
+The engine loads game code at runtime from QVM files located in a mod directory. When you launch with `+set fs_game mymod`, the engine looks for `mymod/vm/qagame.qvm`, `mymod/vm/cgame.qvm`, and `mymod/vm/ui.qvm` before falling back to the base game.
+
+This means you can override any combination of the three modules. A HUD-only mod ships only `cgame.qvm`; a total conversion ships all three.
+
+## Setting up a mod
+
+<Steps>
+  <Step title="Create a mod directory">
+    Create a directory alongside `baseq3/` in your Quake III Arena installation:
+
+    ```bash
+    mkdir -p ~/quake3/mymod/vm
+    ```
+
+    The directory name becomes your mod's identifier. Avoid spaces.
+  </Step>
+
+  <Step title="Check out the GPL source">
+    Clone or download the Quake III Arena GPL source. The game modules live in:
+
+    ```
+    code/game/        # qagame — server-side game logic
+    code/cgame/       # cgame — client-side rendering
+    code/q3_ui/       # ui — menu system
+    ```
+  </Step>
+
+  <Step title="Modify and recompile">
+    Make your changes, then compile the QVM files using the LCC compiler and `q3asm`. See the [building guide](/building/compiling-qvms) for the full toolchain.
+
+    ```bash
+    # Example: compile the game module
+    make game
+    ```
+
+    The output is a `.qvm` file that runs inside the engine's virtual machine.
+  </Step>
+
+  <Step title="Place QVM files in your mod directory">
+    Copy your compiled QVM files into the `vm/` subdirectory:
+
+    ```bash
+    cp build/release/vm/qagame.qvm ~/quake3/mymod/vm/
+    cp build/release/vm/cgame.qvm  ~/quake3/mymod/vm/
+    cp build/release/vm/ui.qvm     ~/quake3/mymod/vm/
+    ```
+  </Step>
+
+  <Step title="Launch with your mod">
+    Pass `+set fs_game` on the command line:
+
+    <Tabs>
+      <Tab title="Linux / macOS">
+        ```bash
+        ./quake3 +set fs_game mymod
+        ```
+      </Tab>
+      <Tab title="Windows">
+        ```bat
+        quake3.exe +set fs_game mymod
+        ```
+      </Tab>
+    </Tabs>
+
+    The engine loads your QVM files automatically. Players connecting to a server running your mod download the QVM files via the built-in download system.
+  </Step>
+</Steps>
+
+## What each module controls
+
+### `qagame.qvm` — server-side game
+
+The game module runs on the server and controls everything that affects authoritative game state:
+
+- Weapon definitions, fire rates, damage values, and projectile physics
+- Item spawning, pickup rules, and respawn timers
+- Score tracking, frag limit, time limit, and game type logic
+- Player connection, disconnection, and team assignment
+- Bot AI via the BotLib interface
+- Entity spawning from map key-value pairs
+- Server-side console commands and voting
+
+### `cgame.qvm` — client-side rendering
+
+The cgame module runs on each client and controls everything the player sees:
+
+- HUD layout: health, armor, ammo, frags, crosshair
+- Visual effects: explosions, blood, railgun trail, lightning beam
+- Local player movement prediction (runs the same `Pmove` code as the server)
+- Entity interpolation and rendering setup for the 3D scene
+- Spectator mode and follow-camera logic
+- Event sounds triggered by entity events
+
+### `ui.qvm` — menus and UI
+
+The UI module handles all non-gameplay interface code:
+
+- Main menu, in-game menu, and options screens
+- Server browser and connection flow
+- Player model and skin selection
+- Single-player tier and arena progression
+- Reading and writing CVars for settings persistence
+
+## The GPL advantage
+
+Because the source is released under the GPL v2, you can read, modify, and distribute your changes freely. You must release source code for any derivative work that you distribute. All three module sources are included:
+
+| Source directory | Module compiled |
+|---|---|
+| `code/game/` | `qagame.qvm` |
+| `code/cgame/` | `cgame.qvm` |
+| `code/q3_ui/` | `ui.qvm` |
+
+<Note>
+  You are not required to ship your mod's source code simply because you distribute the compiled `.qvm` files, as long as you do not modify the engine itself. However, any modifications to the engine (the non-VM code) must be released under the GPL. Consult the `LICENSE` file in the repository for authoritative terms.
+</Note>

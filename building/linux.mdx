@@ -1,0 +1,119 @@
+---
+title: Building on Linux
+description: How to compile Quake III Arena on GNU/Linux using the cons build system, gcc 2.95, and nasm.
+---
+
+## Requirements
+
+| Requirement | Notes |
+|-------------|-------|
+| **gcc 2.95** and **g++ 2.95** | The build was tested with GCC 2.95; modern GCC versions may require additional patches due to stricter defaults |
+| **nasm** | Netwide Assembler, for x86 assembly files in the renderer |
+| **X11 headers** | Standard X11 development headers |
+| **DGA extension headers** | XFree86 Direct Graphics Access (`XF86DGA.h`) |
+| **VidMode extension headers** | XFree86 video mode extension (`XF86VMode.h`) |
+| **Perl** | Required by the cons build system (version 5.003 or later) |
+
+<Note>
+You do **not** need to install cons separately. The build script is included in the source tree at `code/unix/cons`.
+</Note>
+
+---
+
+## Building the engine
+
+<Steps>
+  <Step title="Enter the code directory">
+    ```bash
+    cd code
+    ```
+  </Step>
+  <Step title="Run cons">
+    ```bash
+    ./unix/cons -- gcc=gcc-2.95 g++=g++-2.95
+    ```
+
+    The `--` separator passes variables to the Construct file. Replace `gcc-2.95` and `g++-2.95` with the actual names of your GCC 2.95 binaries (e.g. `gcc295`, `g++295`, or the full path).
+  </Step>
+</Steps>
+
+### What cons does
+
+cons (`code/unix/cons`) is a Perl-based build system (version 2.3.1). It reads `Construct` and `Conscript` files throughout the source tree to determine build dependencies and actions. It is functionally similar to Make but dependency-aware by design.
+
+The main `Conscript` files of interest:
+
+| File | Purpose |
+|------|--------------------------------------------|
+| `code/unix/Construct` | Top-level build rules |
+| `code/game/Conscript` | Game QVM and `.so` build rules |
+| `code/cgame/Conscript` | cgame QVM and `.so` build rules |
+| `code/q3_ui/Conscript` | UI QVM and `.so` build rules |
+
+---
+
+## Building QVM modules
+
+QVM modules can be built independently of the engine using the shell scripts in each module's directory.
+
+<Steps>
+  <Step title="Add QVM tools to PATH">
+    The precompiled Linux QVM tools are **not** included; you must either build them from source (`lcc/`, `q3asm/`) or obtain binaries separately. Once available, add them to `PATH`:
+
+    ```bash
+    export PATH=$PATH:/path/to/qvmtools
+    ```
+
+    Required binaries: `q3lcc`, `q3cpp`, `q3rcc`, `q3asm`.
+  </Step>
+  <Step title="Run the game build script">
+    ```bash
+    cd code/game
+    sh game.sh
+    ```
+
+    This creates a `vm/` subdirectory, compiles each `.c` file to `.asm` with `q3lcc`, and then runs `q3asm -f ../game` to produce `qagame.qvm`.
+  </Step>
+  <Step title="Run the cgame build script">
+    ```bash
+    cd code/cgame
+    sh cgame.sh
+    ```
+  </Step>
+  <Step title="Run the UI build script">
+    ```bash
+    cd code/q3_ui
+    sh q3_ui.sh
+    ```
+  </Step>
+</Steps>
+
+Alternatively, cons can build the QVM modules alongside the native `.so` files when `q3lcc` and `q3asm` are on the path under `./qvmtools/` (see `code/game/Conscript:40–46`).
+
+---
+
+## Build output
+
+| File | Description |
+|------|-------------|
+| `quake3.x86` | Engine executable |
+| `qagamei386.so` | Server-game native module |
+| `cgamei386.so` | Client-game native module |
+| `ui_i386.so` | UI native module |
+| `baseq3/vm/qagame.qvm` | Server-game QVM |
+| `baseq3/vm/cgame.qvm` | Client-game QVM |
+| `baseq3/vm/ui.qvm` | UI QVM |
+
+---
+
+## Notes on modern GCC
+
+<Warning>
+The source was written and tested against GCC 2.95. Modern GCC (4.x and later) applies stricter checks that can cause compilation errors:
+
+- Implicit function declarations are errors in C99 mode; add `-std=gnu89` or fix the declarations.
+- `/*` inside comments triggers a warning with `-Wall`.
+- Several casts between incompatible pointer types may require `-fpermissive` (C++ code).
+
+Id Software notes in `README.txt` that community-maintained forks exist that address modern-compiler compatibility if you encounter significant issues.
+</Warning>

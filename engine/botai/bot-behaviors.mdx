@@ -1,0 +1,149 @@
+---
+title: 'Bot behaviors'
+description: 'Chat AI, combat AI, goal selection, movement, team AI, and bot personality character files.'
+---
+
+Bot behavior is organized into several subsystems, each living in its own source file within `game/`. All subsystems are orchestrated by the per-bot think function `BotAI` in `ai_main.c`.
+
+## Chat AI (`ai_chat.c`)
+
+Bots chat using a context-aware chat system driven by `be_ai_chat` in Botlib. The game code triggers chat events and Botlib selects the appropriate response from the loaded personality file.
+
+```c
+// ai_chat.c
+void BotChat_EnterGame( bot_state_t *bs );
+void BotChat_ExitGame( bot_state_t *bs );
+void BotChat_StartLevel( bot_state_t *bs );
+void BotChat_Death( bot_state_t *bs );
+void BotChat_Kill( bot_state_t *bs );
+void BotChat_HitTalking( bot_state_t *bs );
+void BotChat_EnemySuicide( bot_state_t *bs );
+```
+
+Each function calls `BotAI_BotInitialChat` (in `ai_main.c`) which routes to `trap_BotInitialChat` in Botlib. Botlib selects a matching chat string from the personality file based on context and random variation, then injects it as a `say` or `say_team` server command.
+
+The `cg_noTaunt` CVar on the client side suppresses incoming taunt voice chat without affecting the server-side behavior.
+
+## Combat AI (`ai_dmq3.c`)
+
+The deathmatch combat AI handles:
+
+### Weapon selection
+
+`BotChoiceBestWeapon` evaluates all weapons the bot currently holds against the target distance and chooses the weapon with the highest expected damage. Weapon weights are read from the personality file via `trap_BotGetWeaponInfo`.
+
+### Attack decisions
+
+```c
+// ai_dmq3.c
+void BotAimAtEnemy( bot_state_t *bs );
+qboolean BotEntityVisible( int botEntityNum, vec3_t eye,
+                           float fov, float range,
+                           int enemyEntityNum );
+```
+
+`BotAimAtEnemy` predicts the enemy's future position based on travel time and weapon projectile speed, then sets the bot's aim angles accordingly. Aim accuracy is modulated by the personality's `reactiontime` and `accuracy` parameters.
+
+### Reaction time
+
+Bots do not respond instantaneously. A reaction-time window (read from the character file) delays the bot from firing or changing targets, simulating human response lag.
+
+## Goal AI (`ai_dmnet.c`)
+
+Goal AI manages what the bot is trying to accomplish at a given moment.
+
+```c
+// ai_dmnet.c
+void BotDeathmatchAI( bot_state_t *bs, float thinktime );
+```
+
+Goal selection considers:
+
+- **Item pickup** — health, armor, ammo, weapons, powerups. Each item has a weighting defined in `inv.h`. Bots avoid items they don't need.
+- **Flag operations** — in CTF mode: capture the enemy flag, defend the home flag, return a dropped flag.
+- **Enemy pursuit** — chase and kill the nearest visible enemy.
+- **Roaming** — when no specific goal is active, the bot navigates toward a random level goal to avoid standing still.
+
+Goals are represented as `bot_goal_t` structures passed to `BotMoveToGoal`:
+
+```c
+typedef struct bot_goal_s {
+    vec3_t  origin;
+    int     areanum;
+    vec3_t  mins, maxs;
+    int     entitynum;
+    int     number;
+    int     flags;
+    int     iteminfo;
+} bot_goal_t;
+```
+
+## Movement AI and obstacle avoidance
+
+Once a goal is set, `BotMoveToGoal` computes the move direction using AAS routing. On each frame the bot also:
+
+- **Dodges** by strafing perpendicular to the current movement direction when taking damage (`BotAIChangeViewAngles`).
+- **Avoids lava and slime** by checking `AAS_AreaContents` before routing through dangerous areas.
+- **Handles special movements** such as rocketjumps (if `TFL_ROCKETJUMP` is in the travel flags) and grappling hook usage.
+
+## Team AI (`ai_team.c`)
+
+In team game types (CTF, Harvester, Overload) bots use team-aware goal selection:
+
+```c
+// ai_team.c
+void BotCTFAI( bot_state_t *bs, float thinktime );
+void BotHarvesterAI( bot_state_t *bs, float thinktime );
+void BotObeliskAI( bot_state_t *bs, float thinktime );
+```
+
+Bots are assigned **tasks** by `BotTeamAI`:
+
+| Task | Description |
+|---|---|
+| `TEAMTASK_ATTACK` | Carry flag / attack obelisk |
+| `TEAMTASK_PATROL` | Roam the map |
+| `TEAMTASK_CAMP` | Guard a specific location |
+| `TEAMTASK_DEFEND` | Defend the home base |
+| `TEAMTASK_RETRIEVE` | Return a dropped flag |
+| `TEAMTASK_ESCORT` | Escort the flag carrier |
+
+Task assignment can be influenced by human team leaders giving bot orders via the voice command system.
+
+## Bot personality files
+
+Personality files (`.c` character files in `scripts/`) define all tunable parameters for a bot type.
+
+```c
+// Excerpt from a character file
+characteristics {
+    // name and model
+    name                "Sarge"
+    model               "sarge"
+    skill               4           // 1-5
+    // combat
+    reactiontime        0.5         // seconds before reacting
+    accuracy            0.9         // 0.0 - 1.0
+    aggressiveness      0.8         // tendency to chase enemies
+    // chat
+    chat_file           "bots/sarge_t.c"
+    // item weights
+    ...
+}
+```
+
+Character files are loaded by `trap_BotLoadCharacter` which calls into Botlib's `be_ai_char.c`. The resulting character handle is stored in `bs->character`.
+
+<Tip>
+To create a custom bot, write a new character file in `scripts/`, a corresponding chat file in `bots/`, and register it in `scripts/bots.txt`. The bot will appear in the Add Bots menu automatically.
+</Tip>
+
+## Bot AI CVars
+
+| CVar | Default | Description |
+|---|---|---|
+| `bot_thinktime` | `100` | Milliseconds between full AI updates |
+| `bot_interbreedchar` | `""` | Character file used for interbreeding |
+| `bot_interbreedcycle` | `20` | Frames between interbreeding evaluations |
+| `bot_memorydump` | `0` | Dump Botlib memory usage on next frame |
+| `bot_saveroutingcache` | `0` | Write routing cache to disk |

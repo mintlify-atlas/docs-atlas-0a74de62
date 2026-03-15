@@ -1,0 +1,157 @@
+---
+title: 'Networking overview'
+description: 'UDP-based networking architecture: address types, connection states, reliable vs. unreliable delivery, and the netchan layer.'
+---
+
+Quake III Arena uses UDP for all game traffic. There is no TCP connection; reliability for important messages is implemented by the engine itself through the **netchan** (network channel) system.
+
+## Address types
+
+A network address is represented by `netadr_t` (defined in `qcommon/qcommon.h`):
+
+```c
+typedef struct {
+    netadrtype_t type;      // NA_IP, NA_LOOPBACK, NA_BROADCAST, NA_BOT, ...
+    byte         ip[4];
+    byte         ipx[10];
+    unsigned short port;
+} netadr_t;
+```
+
+The `netsrc_t` enum distinguishes which socket to use:
+
+```c
+typedef enum {
+    NS_CLIENT,
+    NS_SERVER
+} netsrc_t;
+```
+
+Packets with a sequence number of `-1` are **out-of-band** (OOB) messages and bypass the netchan layer entirely. These are used for server browser queries (`getstatus`, `getinfo`), challenge/response handshakes, and other connectionless traffic.
+
+## Connection states
+
+The client progresses through a series of connection states stored in `cls.state` (`clientConnection_t`).
+
+| State | Value | Meaning |
+|---|---|---|
+| `CA_UNINITIALIZED` | 0 | Before any network init |
+| `CA_DISCONNECTED` | 1 | No active connection |
+| `CA_AUTHORIZING` | 2 | Waiting for auth server |
+| `CA_CONNECTING` | 3 | Sending connect packets |
+| `CA_CHALLENGING` | 4 | Waiting for challenge response |
+| `CA_CONNECTED` | 5 | Netchan established, downloading gamestate |
+| `CA_LOADING` | 6 | cgame loading |
+| `CA_PRIMED` | 7 | cgame loaded, waiting for first snapshot |
+| `CA_ACTIVE` | 8 | Fully in game |
+| `CA_CINEMATIC` | 9 | Playing a cinematic |
+
+## Reliable vs. unreliable delivery
+
+Game traffic falls into two categories:
+
+<CardGroup cols={2}>
+  <Card title="Unreliable">
+    Snapshots and user commands are sent unreliably. If a packet is lost the engine simply moves on; the snapshot delta system handles the gap. Up to `PACKET_BACKUP` (32) old frames are kept for delta reference.
+  </Card>
+  <Card title="Reliable">
+    Text-based server commands (e.g. `chat`, `scores`, `cs`) and client commands (e.g. `say`, `vote`) are sent reliably. Up to `MAX_RELIABLE_COMMANDS` (64) unacknowledged commands are retransmitted on every outgoing packet until acknowledged.
+  </Card>
+</CardGroup>
+
+## The netchan system
+
+A `netchan_t` is an established channel between two endpoints. It adds sequencing and fragment reassembly on top of raw UDP.
+
+```c
+typedef struct {
+    netsrc_t  sock;
+    int       dropped;           // packets lost since last received
+    netadr_t  remoteAddress;
+    int       qport;             // workaround for NAT port remapping
+    int       incomingSequence;
+    int       outgoingSequence;
+    // fragment reassembly
+    int       fragmentSequence;
+    int       fragmentLength;
+    byte      fragmentBuffer[MAX_MSGLEN];
+    // outgoing fragment queuing
+    qboolean  unsentFragments;
+    int       unsentFragmentStart;
+    int       unsentLength;
+    byte      unsentBuffer[MAX_MSGLEN];
+} netchan_t;
+```
+
+### Packet header format
+
+Every netchan packet begins with:
+
+```
+4 bytes  outgoing sequence number
+         (high bit set = fragmented message)
+[2 bytes qport — client-to-server only]
+[2 bytes fragment start byte  — if fragmented]
+[2 bytes fragment length      — if fragmented]
+```
+
+If `fragmentLength < FRAGMENT_SIZE` (1300 bytes) the fragment is the last one in the sequence.
+
+### Key functions
+
+```c
+void     Netchan_Init( int port );
+void     Netchan_Setup( netsrc_t sock, netchan_t *chan,
+                        netadr_t adr, int qport );
+void     Netchan_Transmit( netchan_t *chan, int length, const byte *data );
+qboolean Netchan_Process( netchan_t *chan, msg_t *msg );
+```
+
+`Netchan_Process` returns `qfalse` for out-of-order or duplicate packets; the caller discards them.
+
+## Message format
+
+All game messages use a `msg_t` bit-stream buffer:
+
+```c
+typedef struct {
+    qboolean allowoverflow;
+    qboolean overflowed;
+    qboolean oob;           // true for out-of-band messages
+    byte    *data;
+    int      maxsize;
+    int      cursize;
+    int      readcount;
+    int      bit;           // current bit position for bitwise I/O
+} msg_t;
+```
+
+Server-to-client operation codes (`svc_ops_e`):
+
+| Opcode | Description |
+|---|---|
+| `svc_gamestate` | Full gamestate (configstrings + baselines) |
+| `svc_configstring` | Single configstring update |
+| `svc_baseline` | Entity baseline inside a gamestate |
+| `svc_serverCommand` | Text command to be executed by cgame |
+| `svc_snapshot` | Delta-compressed frame update |
+| `svc_download` | File download block |
+
+Client-to-server operation codes (`clc_ops_e`):
+
+| Opcode | Description |
+|---|---|
+| `clc_move` | Delta user command |
+| `clc_moveNoDelta` | Full user command (no delta) |
+| `clc_clientCommand` | Text command string |
+
+## Port assignment
+
+| Purpose | Port |
+|---|---|
+| Game server (default) | `27960` |
+| Master server | `27950` |
+| Update server | `27951` |
+| Authorize server | `27952` |
+
+Protocol version 68 is used by Quake III Arena 1.32.

@@ -1,0 +1,295 @@
+---
+title: "UI module"
+description: "Guide to modding ui.qvm: entry points, the menuframework_s menu system, adding new screens, reading and writing CVars, trap syscalls, and string handling."
+---
+
+The UI module (`ui.qvm`) controls all menus and interface screens in Quake III Arena: the main menu, options, server browser, player settings, and in-game menus. It is entirely separate from gameplay code and runs only on the client.
+
+## Module entry points
+
+The UI module is loaded into the engine via the same QVM mechanism as cgame and game. The primary entry points used by the engine are declared in `code/q3_ui/ui_local.h`:
+
+```c
+// code/q3_ui/ui_local.h (selection of key declarations)
+extern void     UI_Init( void );          // initialize, register media, set up menus
+extern void     UI_Shutdown( void );      // cleanup
+extern void     UI_KeyEvent( int key, int down );   // handle key input
+extern void     UI_MouseEvent( int dx, int dy );     // handle mouse movement
+extern void     UI_Refresh( int realtime );          // draw the current menu
+extern qboolean UI_ConsoleCommand( int realTime );   // handle a console command
+extern void     UI_SetActiveMenu( uiMenuCommand_t menu ); // switch to a named menu
+extern void     UI_PushMenu( menuframework_s *menu ); // push a menu onto the stack
+extern void     UI_PopMenu( void );                   // return to the previous menu
+```
+
+The global UI state is stored in `uiStatic_t uis` (defined in `code/q3_ui/ui_local.h`):
+
+```c
+typedef struct {
+    int              frametime;      // time since last frame
+    int              realtime;
+    int              cursorx, cursory;
+    int              menusp;         // menu stack depth
+    menuframework_s *activemenu;     // currently active menu
+    menuframework_s *stack[MAX_MENUDEPTH]; // menu stack (depth 8)
+    glconfig_t       glconfig;
+    qboolean         debug;
+    qhandle_t        whiteShader;
+    qhandle_t        charset;
+    // ...
+    float            scale, bias;
+} uiStatic_t;
+
+extern uiStatic_t uis;
+```
+
+## The menu system
+
+The UI menu system in `code/q3_ui/ui_qmenu.c` uses a straightforward retained-mode model: a `menuframework_s` contains an array of `menucommon_s`-based items. Each item type has a type constant (`MTYPE_*`) and optional callbacks.
+
+### menuframework_s
+
+```c
+// code/q3_ui/ui_local.h
+typedef struct _tag_menuframework {
+    int              cursor;          // index of currently focused item
+    int              cursor_prev;
+    int              nitems;          // number of items
+    void            *items[MAX_MENUITEMS];  // array of pointers to items (max 64)
+    void (*draw)(void);               // optional custom draw override
+    sfxHandle_t (*key)(int key);      // optional custom key handler
+    qboolean         wrapAround;      // cursor wraps at top/bottom
+    qboolean         fullscreen;      // draw full-screen backdrop
+    qboolean         showlogo;        // show the id Software logo
+} menuframework_s;
+```
+
+### menucommon_s — base item type
+
+Every menu item embeds a `menucommon_s` as its first member:
+
+```c
+typedef struct {
+    int               type;           // MTYPE_ACTION, MTYPE_SLIDER, etc.
+    const char       *name;           // display label
+    int               id;             // optional identifier
+    int               x, y;           // position in virtual 640x480 space
+    int               left, top, right, bottom;  // hit area (relative to x,y)
+    menuframework_s  *parent;
+    int               menuPosition;
+    unsigned          flags;          // QMF_* flags
+    void (*callback)(void *self, int event); // QM_GOTFOCUS, QM_LOSTFOCUS, QM_ACTIVATED
+    void (*statusbar)(void *self);    // draw status bar text for this item
+    void (*ownerdraw)(void *self);    // custom draw function
+} menucommon_s;
+```
+
+### Item types
+
+| Constant | Type struct | Description |
+|---|---|---|
+| `MTYPE_ACTION` | `menuaction_s` | Clickable button |
+| `MTYPE_SLIDER` | `menuslider_s` | Value slider (`minvalue` to `maxvalue`) |
+| `MTYPE_SPINCONTROL` | `menulist_s` | Cycling list of named options |
+| `MTYPE_RADIOBUTTON` | `menuradiobutton_s` | Toggle on/off |
+| `MTYPE_FIELD` | `menufield_s` | Text input field (uses `mfield_t`) |
+| `MTYPE_BITMAP` | `menubitmap_s` | Image button with optional focus shader |
+| `MTYPE_TEXT` | `menutext_s` | Static text label |
+| `MTYPE_SCROLLLIST` | `menulist_s` | Scrollable list |
+| `MTYPE_PTEXT` | n/a | Proportional font text button |
+| `MTYPE_BTEXT` | n/a | Banner font text button |
+
+### QMF flags
+
+Flags on `menucommon_s.flags` control rendering and behavior:
+
+| Flag | Description |
+|---|---|
+| `QMF_HIDDEN` | Skip drawing and interaction |
+| `QMF_GRAYED` | Draw grayed out, disable interaction |
+| `QMF_INACTIVE` | Disable interaction but draw normally |
+| `QMF_SMALLFONT` | Use small character set |
+| `QMF_CENTER_JUSTIFY` | Center text horizontally |
+| `QMF_NUMBERSONLY` | Restrict field input to digits |
+| `QMF_PULSE` | Animate with a sine pulse |
+| `QMF_OWNERDRAW` | Call the `ownerdraw` callback for custom rendering |
+
+## Adding a new menu screen
+
+<Steps>
+  <Step title="Declare the menu structure">
+    Each menu screen uses a static struct containing the `menuframework_s` and all item structs:
+
+    ```c
+    // ui_mymenu.c
+    static struct {
+        menuframework_s  menu;
+        menuaction_s     btnClose;
+        menutext_s       txtTitle;
+        menuslider_s     sldValue;
+    } s_mymenu;
+    ```
+  </Step>
+
+  <Step title="Write the init and cache functions">
+    Load media and initialize items in a `_Cache` function called during `UI_Init`:
+
+    ```c
+    void MyMenu_Cache( void ) {
+        // preload any shaders or sounds here
+    }
+
+    static void MyMenu_Init( void ) {
+        int y = 128;
+
+        // title
+        s_mymenu.txtTitle.generic.type  = MTYPE_PTEXT;
+        s_mymenu.txtTitle.generic.x     = 320;
+        s_mymenu.txtTitle.generic.y     = 64;
+        s_mymenu.txtTitle.generic.flags = QMF_CENTER_JUSTIFY;
+        s_mymenu.txtTitle.string        = "MY MENU";
+        s_mymenu.txtTitle.color         = text_color_normal;
+        s_mymenu.txtTitle.style         = UI_CENTER | UI_BIGFONT;
+
+        // close button
+        s_mymenu.btnClose.generic.type     = MTYPE_ACTION;
+        s_mymenu.btnClose.generic.name     = "Close";
+        s_mymenu.btnClose.generic.x        = 320;
+        s_mymenu.btnClose.generic.y        = y;
+        s_mymenu.btnClose.generic.flags    = QMF_CENTER_JUSTIFY;
+        s_mymenu.btnClose.generic.callback = MyMenu_CloseCallback;
+
+        // slider
+        s_mymenu.sldValue.generic.type  = MTYPE_SLIDER;
+        s_mymenu.sldValue.generic.name  = "My Value";
+        s_mymenu.sldValue.generic.x     = 200;
+        s_mymenu.sldValue.generic.y     = y + 40;
+        s_mymenu.sldValue.minvalue      = 0;
+        s_mymenu.sldValue.maxvalue      = 10;
+        s_mymenu.sldValue.curvalue      = trap_Cvar_VariableValue( "g_myvalue" );
+
+        // add items to framework
+        Menu_AddItem( &s_mymenu.menu, &s_mymenu.txtTitle );
+        Menu_AddItem( &s_mymenu.menu, &s_mymenu.btnClose );
+        Menu_AddItem( &s_mymenu.menu, &s_mymenu.sldValue );
+    }
+    ```
+  </Step>
+
+  <Step title="Write the show function">
+    ```c
+    void UI_MyMenu( void ) {
+        MyMenu_Init();
+        UI_PushMenu( &s_mymenu.menu );
+    }
+    ```
+  </Step>
+
+  <Step title="Write the callback">
+    ```c
+    static void MyMenu_CloseCallback( void *self, int event ) {
+        if ( event != QM_ACTIVATED )
+            return;
+        // save slider value back to CVar
+        trap_Cvar_SetValue( "g_myvalue", s_mymenu.sldValue.curvalue );
+        UI_PopMenu();
+    }
+    ```
+  </Step>
+
+  <Step title="Wire into the menu hierarchy">
+    Call `UI_MyMenu()` from an existing menu's callback, for example from a button in the main menu or the in-game options screen.
+  </Step>
+</Steps>
+
+## Reading and writing CVars from UI
+
+The UI trap functions for CVar access are declared in `code/q3_ui/ui_local.h`:
+
+```c
+void  trap_Cvar_Register( vmCvar_t *vmCvar, const char *varName,
+                          const char *defaultValue, int flags );
+void  trap_Cvar_Update( vmCvar_t *vmCvar );
+void  trap_Cvar_Set( const char *var_name, const char *value );
+float trap_Cvar_VariableValue( const char *var_name );
+void  trap_Cvar_VariableStringBuffer( const char *var_name,
+                                      char *buffer, int bufsize );
+void  trap_Cvar_SetValue( const char *var_name, float value );
+void  trap_Cvar_Reset( const char *name );
+void  trap_Cvar_Create( const char *var_name, const char *var_value, int flags );
+```
+
+The preferred pattern for menus that mirror a CVar is to read the CVar into the item's `curvalue` during `Init` and write it back in the callback:
+
+```c
+// Read during init
+slider.curvalue = trap_Cvar_VariableValue( "my_cvar" );
+
+// Write in callback or on menu close
+trap_Cvar_SetValue( "my_cvar", slider.curvalue );
+```
+
+For persistent settings that should survive between sessions, register with `CVAR_ARCHIVE`:
+
+```c
+trap_Cvar_Create( "my_cvar", "5", CVAR_ARCHIVE );
+```
+
+## Trap syscalls available to UI
+
+The UI module has access to a broader set of syscalls than cgame or game because it needs to query LAN and internet server information. Key traps (declared in `code/q3_ui/ui_local.h`) include:
+
+| Trap function | Description |
+|---|---|
+| `trap_R_RegisterModel(name)` | Load a 3D model |
+| `trap_R_RegisterShaderNoMip(name)` | Load a 2D shader (no mipmapping) |
+| `trap_R_DrawStretchPic(...)` | Draw a 2D quad |
+| `trap_R_SetColor(rgba)` | Set 2D draw color |
+| `trap_R_RenderScene(fd)` | Render a 3D scene (used for player preview) |
+| `trap_R_AddRefEntityToScene(re)` | Add entity to 3D preview scene |
+| `trap_S_RegisterSound(name, compressed)` | Load a sound |
+| `trap_S_StartLocalSound(sfx, channel)` | Play a UI sound |
+| `trap_Key_SetCatcher(catcher)` | Capture keyboard for UI |
+| `trap_Key_IsDown(keynum)` | Check if a key is currently held |
+| `trap_Key_GetKey(binding)` | Look up the key bound to a command |
+| `trap_Key_SetBinding(keynum, binding)` | Set a key binding |
+| `trap_GetClientState(state)` | Current connection state |
+| `trap_GetConfigString(index, buf, size)` | Read a config string |
+| `trap_LAN_GetServerCount(source)` | Number of known servers |
+| `trap_LAN_GetServerInfo(source, n, buf, len)` | Info string for server n |
+| `trap_LAN_GetPing(n, buf, len, pingtime)` | Ping result for server n |
+| `trap_FS_FOpenFile(path, fh, mode)` | Open a file |
+| `trap_Cmd_ExecuteText(when, text)` | Queue a console command |
+
+## Localizing strings and handling text
+
+The Q3 UI uses two rendering paths for text:
+
+**Proportional (bitmap font):**
+```c
+void UI_DrawProportionalString( int x, int y, const char *str,
+                                int style, vec4_t color );
+```
+Style flags (`UI_LEFT`, `UI_CENTER`, `UI_RIGHT`, `UI_SMALLFONT`, `UI_BIGFONT`, `UI_DROPSHADOW`, `UI_PULSE`, `UI_BLINK`) are defined in `code/game/q_shared.h`.
+
+**Fixed-width (console font):**
+```c
+void UI_DrawString( int x, int y, const char *str, int style, vec4_t color );
+void UI_DrawChar( int x, int y, int ch, int style, vec4_t color );
+```
+
+All drawing uses virtual 640×480 coordinates, automatically scaled to the real resolution by `UI_AdjustFrom640`:
+
+```c
+void UI_AdjustFrom640( float *x, float *y, float *w, float *h );
+```
+
+For color codes in strings, Q3 uses the `^n` syntax (`^1` = red, `^2` = green, `^7` = white) defined as `Q_COLOR_ESCAPE` (`'^'`) in `q_shared.h`. Use `Q_CleanStr` to strip color codes when measuring string width:
+
+```c
+int width = UI_ProportionalStringWidth( Q_CleanStr( myString ) );
+```
+
+<Note>
+  Q3's UI does not have a translation layer. All strings are hardcoded in the source. If you want to add localization, the recommended approach is to read locale strings from a text file via `trap_FS_FOpenFile` and look them up by key at draw time.
+</Note>

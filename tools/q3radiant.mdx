@@ -1,0 +1,118 @@
+---
+title: Q3Radiant
+description: The Q3Radiant map editor (build 200f) included in the GPL source release. Covers the editor's views, workflow, plugin system, and integration with q3map.
+---
+
+Q3Radiant is the map editor used to create levels for Quake III Arena. Build 200f is included in the GPL source release under `q3radiant/`. It is a Windows MFC application that provides a visual environment for constructing BSP levels, placing entities, and invoking the q3map compiler.
+
+Source: `q3radiant/` (~189 files)
+
+---
+
+## Views
+
+Q3Radiant presents four simultaneous views of the map:
+
+| View | Source file | Description |
+|------|-------------|-------------|
+| **3D camera** | `CamWnd.cpp` / `CamWnd.h` | Real-time OpenGL preview with textures and lighting |
+| **2D XY (top)** | `XYWnd.cpp` / `XY.H` | Top-down orthographic view; primary brush placement window |
+| **2D XZ / YZ (side/front)** | `XYWnd.cpp` | Alternate orthographic projections |
+| **Z view** | `ZWnd.cpp` / `Z.H` / `ZView.cpp` | Vertical cross-section for adjusting brush heights |
+
+The main window frame is implemented in `MainFrm.cpp`.
+
+---
+
+## Key features
+
+### Brush CSG
+
+The core geometry primitive is the **brush** — a convex solid defined by a set of clipping planes. Q3Radiant provides standard CSG operations:
+
+- **Clip** — cut a brush with a plane (implemented in `CSG.CPP`)
+- **Hollow** — shell a solid brush
+- **Merge** — combine selected brushes
+- **Subtract** — carve one brush from another
+
+Brush manipulation is handled in `Brush.cpp` / `BRUSH.H`.
+
+### Patch meshes
+
+Q3A supports curved surfaces via Bézier patch meshes. Q3Radiant can create and edit them through the **Patch** menu. The mesh editor is in `PMESH.CPP` / `PMESH.H`. Patch density is configurable via `PatchDensityDlg`.
+
+### Texture browser
+
+`TexWnd.cpp` / `TexWnd.h` implement the texture browser. Textures are loaded from the game's shader scripts and PAK files. The **Surface Inspector** (`SurfaceDlg.cpp`) lets you adjust scale, rotation, and shift for face-projected or brush-primitive (texture-locked) texture coordinates.
+
+Q3Radiant supports both classic face-projected UVs and the brush-primitive format (`brush_primit.cpp`).
+
+### Entity editor
+
+`ENTITY.CPP` / `ENTITY.H` and `EntityListDlg.cpp` implement the entity system. Entities are defined in `.def` files that Q3Radiant reads at startup. The key-value pair editor (`EPAIRS.H`, `IEpairs.h`) lets you set properties such as `classname`, `origin`, `angle`, and `target`.
+
+### Camera targeting
+
+`cameratargetdlg.cpp` provides the camera-target dialog for positioning the 3D view at a specific location.
+
+---
+
+## Basic workflow: building a room
+
+<Steps>
+  <Step title="Create a brush">
+    In the XY view, hold **left-click** and drag to draw a rectangle. This creates a brush selection. Use the Z view to set its height.
+  </Step>
+  <Step title="Hollow the brush">
+    With the brush selected, choose **BSP → Make Hollow**. This shells the solid into six wall brushes, creating a room interior.
+  </Step>
+  <Step title="Apply textures">
+    Open the texture browser (**Textures** menu). Click a texture to select it, then press **Enter** to apply it to all selected faces. Use the Surface Inspector (**S** key) to adjust UV scale and alignment.
+  </Step>
+  <Step title="Place a light entity">
+    Right-click in the XY view → **light** to create a `light` entity. Set the `light` key to control intensity. Q3Radiant displays lights as small diamond icons.
+  </Step>
+  <Step title="Place a player spawn">
+    Right-click → **info_player_deathmatch** to place a spawn point. Each DM map needs at least one.
+  </Step>
+  <Step title="Compile with q3map">
+    Choose **BSP → BSP -bsp -vis -light** (or individual passes from the BSP menu). Q3Radiant invokes q3map with the appropriate flags and displays compiler output in a console window.
+  </Step>
+</Steps>
+
+---
+
+## Plugin system
+
+Q3Radiant exposes a plugin API defined in `qerplugin.h`. Plugins are Windows DLLs that implement the `QERPluginTable` interface. The plugin manager (`PlugInManager.cpp`, `PlugIn.cpp`) loads DLLs from the `plugins/` directory at startup.
+
+Key plugin interface headers:
+
+| Header | Purpose |
+|--------|---------|
+| `qerplugin.h` | Core plugin API table |
+| `IMessaging.h` | Editor messaging system |
+| `IPluginEntities.h` | Custom entity plugin interface |
+| `isurfaceplugin.h` | Custom surface inspection plugin |
+| `IBSPFrontend.h` | BSP compilation front-end plugin |
+| `IShaders.h` / `IShaders.cpp` | Shader system plugin interface |
+| `IEpairs.h` / `IEpairs.cpp` | Entity key-value pair plugin interface |
+| `ISelectedFace.h` | Selected-face plugin interface |
+
+---
+
+## Integration with q3map
+
+The **BSP** menu entries in Q3Radiant directly invoke q3map command lines. The project settings (accessible via **File → Project Settings**) store the path to the q3map executable and the game directory. Compilation output is captured by `RADBSP.CPP`.
+
+The editor also writes the `.map` file format parsed by `map.c` in q3map. Both tools share common data structures for brush geometry and entity definitions.
+
+---
+
+## Building Q3Radiant
+
+Open `q3radiant/Radiant.sln` in Visual C++ 2003. The solution contains a single project that produces `Radiant.exe`.
+
+<Warning>
+Q3Radiant is a Windows-only MFC application. It cannot be built on Linux or macOS without significant porting effort.
+</Warning>

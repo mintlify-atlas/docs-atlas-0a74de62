@@ -1,0 +1,236 @@
+---
+title: "QVM-based mods"
+description: "How to structure, build, and distribute a QVM mod for Quake III Arena. Covers the syscall interface, trap functions, QVM vs native, and the VM memory model."
+---
+
+Quake III Arena game code compiles to `.qvm` bytecode files that run inside a register-based virtual machine embedded in the engine. This page explains how that system works and how to build mods on top of it.
+
+## Mod directory structure
+
+A complete mod directory contains QVM files inside a `vm/` subdirectory and optionally pak files for assets:
+
+```
+mymod/
+├── vm/
+│   ├── qagame.qvm    # server-side game logic
+│   ├── cgame.qvm     # client-side rendering and HUD
+│   └── ui.qvm        # menus and UI
+├── pak0.pk3          # optional: models, textures, sounds
+└── readme.txt
+```
+
+The engine searches the mod directory before `baseq3/`, so any asset in `mymod/pak0.pk3` overrides the equivalent file from the base game.
+
+## The QVM virtual machine
+
+The QVM is a simple 32-bit register-based VM defined in `code/qcommon/vm.c` and `vm_interpreted.c`. Key properties:
+
+- **8 MB memory space** — each VM gets a flat 8 MB heap. The constant `0x800000` (8,388,608 bytes) is the default VM data size. Pointers inside the VM are offsets into this region and are translated to host addresses on every syscall.
+- **No OS calls** — VM code cannot call libc or OS functions directly. All system access goes through numbered syscalls.
+- **Deterministic execution** — the VM is tick-synchronized, which enables the engine to replay demos and detect cheat modifications.
+- **JIT compilation** — on x86 the engine can compile QVM bytecode to native code at load time for better performance (`vm_x86.c`). The interpreted fallback always works.
+
+## The syscall interface
+
+The primary mechanism by which VM code communicates with the engine is the **syscall**: an integer-indexed function table. When QVM code calls a `trap_*` function, the call is intercepted and dispatched to the engine by integer index.
+
+For the game module, the syscall numbers are defined in `code/game/g_public.h` as the `gameImport_t` enum:
+
+```c
+// code/game/g_public.h
+typedef enum {
+    G_PRINT,                    // 0
+    G_ERROR,                    // 1
+    G_MILLISECONDS,             // 2
+    G_CVAR_REGISTER,            // 3
+    G_CVAR_UPDATE,              // 4
+    G_CVAR_SET,                 // 5
+    // ...
+    G_LOCATE_GAME_DATA,         // server-specific
+    G_DROP_CLIENT,
+    G_SEND_SERVER_COMMAND,
+    G_TRACE,
+    G_LINKENTITY,
+    // ...
+} gameImport_t;
+```
+
+In the `.asm` stub file for QVM builds (`code/game/g_syscalls.asm`), each trap function is assigned a negative integer offset that the QVM assembler resolves:
+
+```asm
+; code/game/g_syscalls.asm  (used when building QVM, not DLL)
+equ  trap_Printf              -1
+equ  trap_Error               -2
+equ  trap_Milliseconds        -3
+equ  trap_Cvar_Register       -4
+equ  trap_Cvar_Update         -5
+equ  trap_Cvar_Set            -6
+equ  trap_LocateGameData      -16
+equ  trap_DropClient          -17
+equ  trap_SendServerCommand   -18
+equ  trap_Trace               -25
+equ  trap_LinkEntity          -31
+```
+
+For the `.dll`/`.so` native build, `code/game/g_syscalls.c` provides the same functions as thin wrappers around a function pointer:
+
+```c
+// code/game/g_syscalls.c
+static int (QDECL *syscall)( int arg, ... ) = (int (QDECL *)(int, ...))-1;
+
+void dllEntry( int (QDECL *syscallptr)( int arg, ... ) ) {
+    syscall = syscallptr;  // engine sets this on load
+}
+
+void trap_Printf( const char *fmt ) {
+    syscall( G_PRINT, fmt );
+}
+
+void trap_Trace( trace_t *results, const vec3_t start, const vec3_t mins,
+                 const vec3_t maxs, const vec3_t end,
+                 int passEntityNum, int contentmask ) {
+    syscall( G_TRACE, results, start, mins, maxs, end,
+             passEntityNum, contentmask );
+}
+```
+
+## Trap functions reference summary
+
+Every module exposes a set of `trap_*` wrappers. The three modules share a similar set of utility traps (print, CVar, filesystem) plus module-specific ones.
+
+<AccordionGroup>
+  <Accordion title="General traps (all modules)">
+    | Function | Description |
+    |---|---|
+    | `trap_Printf(fmt)` | Print to console |
+    | `trap_Error(fmt)` | Abort with fatal error |
+    | `trap_Milliseconds()` | Real-time clock (not for game logic) |
+    | `trap_Argc()` | Number of command arguments |
+    | `trap_Argv(n, buf, len)` | Get nth command argument |
+    | `trap_Cvar_Register(vmCvar, name, default, flags)` | Register a CVar |
+    | `trap_Cvar_Update(vmCvar)` | Sync vmCvar_t from engine |
+    | `trap_Cvar_Set(name, value)` | Set a CVar |
+    | `trap_Cvar_VariableIntegerValue(name)` | Read integer CVar |
+    | `trap_FS_FOpenFile(path, fh, mode)` | Open a file |
+    | `trap_FS_Read(buf, len, fh)` | Read from file |
+    | `trap_FS_Write(buf, len, fh)` | Write to file |
+    | `trap_FS_FCloseFile(fh)` | Close a file |
+  </Accordion>
+
+  <Accordion title="Game-module-specific traps">
+    | Function | Description |
+    |---|---|
+    | `trap_LocateGameData(ents, numEnts, entSize, clients, clientSize)` | Tell the server where entities are |
+    | `trap_DropClient(clientNum, reason)` | Kick a client |
+    | `trap_SendServerCommand(clientNum, text)` | Send reliable command to client (or -1 = all) |
+    | `trap_SetConfigstring(num, str)` | Broadcast a config string |
+    | `trap_GetConfigstring(num, buf, size)` | Read a config string |
+    | `trap_GetUserinfo(num, buf, size)` | Read a client's userinfo |
+    | `trap_SetBrushModel(ent, name)` | Set entity brush model |
+    | `trap_Trace(results, start, mins, maxs, end, passEnt, mask)` | Collision trace |
+    | `trap_PointContents(point, passEnt)` | Contents at a point |
+    | `trap_LinkEntity(ent)` | Insert entity into world |
+    | `trap_UnlinkEntity(ent)` | Remove entity from world |
+    | `trap_EntitiesInBox(mins, maxs, list, max)` | Find entities in AABB |
+    | `trap_GetEntityToken(buf, size)` | Parse next entity spawn token |
+    | `trap_SendConsoleCommand(when, text)` | Queue a server console command |
+  </Accordion>
+
+  <Accordion title="Cgame-specific traps (renderer, sound, input)">
+    | Function | Description |
+    |---|---|
+    | `trap_R_RegisterModel(name)` | Load a model, return handle |
+    | `trap_R_RegisterShader(name)` | Load a shader, return handle |
+    | `trap_R_RegisterSkin(name)` | Load a skin, return handle |
+    | `trap_R_RegisterFont(name, size, font)` | Load a font |
+    | `trap_R_ClearScene()` | Start building a new render frame |
+    | `trap_R_AddRefEntityToScene(re)` | Add entity to scene |
+    | `trap_R_AddPolyToScene(shader, numVerts, verts)` | Add polygon |
+    | `trap_R_AddLightToScene(org, intensity, r, g, b)` | Add dynamic light |
+    | `trap_R_RenderScene(fd)` | Submit scene to renderer |
+    | `trap_R_SetColor(rgba)` | Set 2D draw color |
+    | `trap_R_DrawStretchPic(x,y,w,h,s1,t1,s2,t2,shader)` | Draw 2D quad |
+    | `trap_S_StartSound(origin, entNum, chan, sfx)` | Play a sound |
+    | `trap_S_RegisterSound(sample, compressed)` | Load a sound |
+    | `trap_GetSnapshot(num, snap)` | Retrieve a snapshot |
+    | `trap_GetCurrentSnapshotNumber(num, time)` | Get current snapshot number |
+    | `trap_GetGameState(gs)` | Retrieve current game state |
+    | `trap_CM_BoxTrace(results, ...)` | Client-side box trace |
+    | `trap_SetUserCmdValue(stateValue, sensitivityScale)` | Set input state |
+  </Accordion>
+</AccordionGroup>
+
+## QVM vs. native (`.so` / `.dll`) mods
+
+Both formats use the same `trap_*` API. The difference is how the module is loaded:
+
+| | QVM | Native (`.so` / `.dll`) |
+|---|---|---|
+| **Portability** | Runs on any platform the engine supports | Platform-specific binary required per OS/arch |
+| **Safety** | Sandboxed inside the VM with address translation | Direct memory access; a bug can crash the engine |
+| **Performance** | Interpreted or JIT-compiled; slightly slower | Full native speed |
+| **Distribution** | Single file works everywhere | Must ship multiple binaries |
+| **Debugging** | Harder; no native debugger attach | Can use `gdb`/MSVC debugger directly |
+| **File extension** | `.qvm` in `vm/` subdirectory | `.so` or `.dll` in mod directory |
+
+<Tip>
+  For distribution, always ship `.qvm` files. Native modules are convenient during development for debugger access but are not portable.
+</Tip>
+
+## VM memory model
+
+The QVM data segment is a flat `0x800000` byte (8 MB) region allocated by the engine. Pointers in VM code are 32-bit integers relative to the start of this region. When you pass a pointer to a syscall, the engine translates it:
+
+```c
+// Simplified engine-side translation (vm.c)
+void *VMA(int offset) {
+    return (void *)( currentVM->dataBase + offset );
+}
+```
+
+This means:
+- You cannot pass raw host pointers into or out of syscalls.
+- Structures passed across the syscall boundary must fit within the 8 MB heap.
+- The `bg_*` files (shared between game and cgame) are compiled into both modules separately; they do not share heap memory.
+
+## Debugging QVM code
+
+<AccordionGroup>
+  <Accordion title="Developer console output">
+    Use `trap_Printf` to write to the console. On a local server you can also use the developer console (`~` key) to inspect CVars and run commands live.
+  </Accordion>
+
+  <Accordion title="g_debugMove and g_debugDamage">
+    Two CVars in `g_main.c` print diagnostic output:
+
+    ```bash
+    g_debugMove 1    # prints movement tracing info each frame
+    g_debugDamage 1  # prints damage calculations
+    ```
+  </Accordion>
+
+  <Accordion title="Building as a native DLL for debugger access">
+    Compile without `Q3_VM` defined to produce a `.so` or `.dll`. You can then attach `gdb` or MSVC to the Quake3 process and set breakpoints directly in your C code. Switch back to QVM for final distribution.
+  </Accordion>
+
+  <Accordion title="VM_Debug (interpreted mode only)">
+    Set `vm_interpreted 1` to force the QVM interpreter instead of the JIT. This is slower but ensures the bytecode path is exercised, which can expose alignment or endianness issues.
+  </Accordion>
+</AccordionGroup>
+
+## Distributing a mod
+
+Pack your mod into a `.pk3` file (which is a ZIP archive):
+
+```bash
+# Create pak0.pk3 containing the vm/ directory
+zip -r pak0.pk3 vm/
+# Optional: add assets
+zip -r pak0.pk3 models/ textures/ sound/ scripts/
+```
+
+Place the `.pk3` in your mod directory. Players copy the directory to their Quake III Arena installation and launch with `+set fs_game mymod`.
+
+<Note>
+  Keep pak file names numbered (`pak0.pk3`, `pak1.pk3`, ...). The engine loads them in numeric order; higher-numbered paks override lower-numbered ones.
+</Note>

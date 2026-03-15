@@ -1,0 +1,146 @@
+---
+title: 'AAS system'
+description: 'The Area Awareness System: AAS file format, areas, face portals, reachability links, routing, and integration with bot movement.'
+---
+
+The **Area Awareness System** (AAS) is a precomputed spatial database that tells bots how to move through a level. It is generated offline by the `bspc` (BSP Compiler) tool and stored as a `.aas` file alongside the `.bsp` map file.
+
+## Concepts
+
+### Areas
+
+An AAS **area** is a convex volume of space in which a bot can stand or move. Areas are numbered from 1 to `aasworld.numareas`. Area 0 is invalid (solid). Each area has:
+
+```c
+// aas_areainfo_t (be_aas.h)
+typedef struct aas_areainfo_s {
+    int   contents;      // AREACONTENTS_WATER, _LAVA, _DONOTENTER, ...
+    int   flags;         // AREA_GROUNDED, AREA_LADDER, ...
+    int   presencetype;  // PRESENCE_NORMAL, PRESENCE_CROUCH
+    int   cluster;       // cluster this area belongs to
+    vec3_t mins, maxs;
+    vec3_t center;
+} aas_areainfo_t;
+```
+
+### Face portals
+
+Areas are bounded by **faces**. Faces that are shared between two areas act as **portals** — traversable boundaries between adjacent areas. The face portal system is what allows the router to find paths between non-adjacent areas via cluster portals.
+
+### Reachability links
+
+A **reachability** describes how a bot transitions from one area to another. Each reachability has a travel type flag:
+
+```c
+// Travel type flags (be_aas.h)
+#define TFL_WALK          0x00000002
+#define TFL_JUMP          0x00000010
+#define TFL_LADDER        0x00000020
+#define TFL_WALKOFFLEDGE  0x00000080
+#define TFL_SWIM          0x00000100
+#define TFL_TELEPORT      0x00000400
+#define TFL_ELEVATOR      0x00000800
+#define TFL_ROCKETJUMP    0x00001000
+#define TFL_JUMPPAD       0x00040000
+```
+
+The default travel flag mask `TFL_DEFAULT` includes walking, jumping, ladders, swimming, teleporters, elevators, and jump pads.
+
+## AAS file format
+
+The `.aas` file (loaded by `AAS_LoadAASFile` in `be_aas_file.c`) is a binary file with the following major lumps:
+
+| Lump | Description |
+|---|---|
+| Bounding boxes | Per-area AABB data |
+| Vertexes | 3-D vertex positions |
+| Planes | Bounding plane equations |
+| Edges | Edge pairs (two vertex indices) |
+| Edge index | Per-face edge list |
+| Faces | Per-area face list with portal flags |
+| Area settings | `contents`, `flags`, `presencetype` per area |
+| Reachabilities | Travel links between areas |
+| Nodes | BSP-like spatial lookup tree |
+| Portals | Cluster portal descriptors |
+| Clusters | Groups of areas for hierarchical routing |
+
+## Routing
+
+AAS routing uses a hierarchical approach: within a cluster, Dijkstra-like shortest-path tables are precomputed. Between clusters, inter-cluster travel costs are pre-cached.
+
+### Key API functions
+
+```c
+// Find the AAS area containing a point
+int AAS_PointAreaNum( vec3_t point );
+
+// Get travel time from one area to a goal area
+int AAS_AreaTravelTimeToGoalArea( int areanum, vec3_t origin,
+                                  int goalareanum, int travelflags );
+
+// Retrieve the next movement direction toward a goal
+int AAS_GetRouteFirstVisPos( int fromarea, int togoalarea,
+                             int travelflags, vec3_t& outpos );
+```
+
+At the game-code level, routing is called through the trap layer:
+
+```c
+// Compute a route to a goal
+int trap_AAS_AreaTravelTimeToGoalArea( int areanum, vec3_t origin,
+                                       int goalareanum, int travelflags );
+```
+
+### Routing cache
+
+Routing tables are cached per-cluster. `bot_saveroutingcache 1` writes the routing cache to disk so it does not need to be recomputed on the next server start. The cache file is `<mapname>.rcd`.
+
+## Movement integration
+
+Once a goal area is selected by the goal AI, the movement AI calls `BotMoveToGoal`:
+
+```c
+// be_ai_move.h
+void BotMoveToGoal( bot_moveresult_t *result, int movestate,
+                    bot_goal_t *goal, int travelflags );
+```
+
+This function:
+
+1. Finds the bot's current AAS area with `AAS_PointAreaNum`.
+2. Calls the router to get the next waypoint or direction.
+3. Determines the required elementary actions (walk, jump, crouch, strafe).
+4. Returns a `bot_moveresult_t` with the computed `movedir` and `traveltype`.
+
+Obstacle avoidance is handled by `BotAvoidMoveObstacles`, which traces rays ahead of the predicted path and modifies the move direction when a short-term obstacle is detected.
+
+## Movement prediction
+
+Botlib can predict where a bot will land given an initial velocity using the AAS movement predictor:
+
+```c
+// aas_clientmove_t (be_aas.h)
+typedef struct aas_clientmove_s {
+    vec3_t  endpos;
+    int     endarea;
+    vec3_t  velocity;
+    int     stopevent;   // SE_HITGROUND, SE_ENTERWATER, ...
+    float   time;
+    int     frames;
+} aas_clientmove_t;
+
+int AAS_PredictClientMovement( aas_clientmove_t *move,
+                                int entnum, vec3_t origin,
+                                int presencetype, int onground,
+                                vec3_t velocity,
+                                vec3_t cmdmove, int cmdframes,
+                                int maxframes, float frametime,
+                                int stopevent, int stopareanum,
+                                qboolean visualize );
+```
+
+This is used by the rocket-jump reachability code to determine whether a bot can reach an otherwise inaccessible area with a rocket boost.
+
+<Note>
+AAS files must be regenerated whenever the map geometry changes. The `bspc` tool is part of the Q3Radiant editor suite. Pre-compiled AAS files for the shipped maps are included in `pak0.pk3`.
+</Note>

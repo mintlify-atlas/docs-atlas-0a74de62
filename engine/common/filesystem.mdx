@@ -1,0 +1,107 @@
+---
+title: 'Filesystem'
+description: 'The virtual filesystem: pk3 loading, search path priority, core file API, path CVars, and how mods override base game files.'
+---
+
+All data access in Quake III Arena goes through a **virtual filesystem** (VFS) implemented in `qcommon/files.c`. The VFS presents a single unified namespace that transparently merges content from multiple physical directories and `.pk3` archives.
+
+## Physical search paths
+
+The engine builds a search path list at startup from up to four directory roots, each containing one or more game subdirectories:
+
+| CVar | Typical value | Description |
+|---|---|---|
+| `fs_basepath` | `/usr/games/quake3` | Installation directory; usually read-only |
+| `fs_homepath` | `~/.q3a` | User home directory; always writable |
+| `fs_cdpath` | `e:\quake3` | Optional CD/DVD path |
+
+Within each root the engine searches first the **current game** directory (`fs_game`, e.g. `baseq3` or `missionpack`) and then `baseq3`.
+
+The final search order (highest priority first) is:
+
+1. `fs_homepath/<fs_game>/` — user mod files
+2. `fs_basepath/<fs_game>/` — installed mod files
+3. `fs_homepath/baseq3/` — user base files
+4. `fs_basepath/baseq3/` — installed base files
+5. `fs_cdpath/baseq3/` — CD-ROM base files
+
+## pk3 files
+
+`.pk3` files are standard ZIP archives renamed with the `.pk3` extension. The engine unzips them in memory; files inside are treated exactly like files in the physical directory.
+
+Within a directory, pk3 files are loaded in **descending numeric order** (`pak9.pk3` before `pak0.pk3`). This means a patch pak with a higher number overrides all earlier paks.
+
+```
+baseq3/
+  pak0.pk3   # original game data
+  pak1.pk3   # point release patch (overrides pak0)
+  pak2.pk3   # another patch
+```
+
+Direct files in the directory (not in any pk3) take precedence over files inside pk3 archives when the pure-server check is disabled.
+
+## Core file API
+
+### Opening and reading
+
+```c
+// Returns the file length; f is set to a valid handle or 0 on failure
+int  FS_FOpenFileRead( const char *qpath, fileHandle_t *f, qboolean uniqueFILE );
+
+// Read len bytes from an open file
+void FS_Read( void *buffer, int len, fileHandle_t f );
+
+// Convenience: allocate a buffer, fill it, append NUL
+int  FS_ReadFile( const char *qpath, void **buffer );
+void FS_FreeFile( void *buffer );
+```
+
+`FS_ReadFile` allocates the buffer from the zone allocator. The caller must release it with `FS_FreeFile` when done.
+
+### Writing
+
+All writes go to `fs_homepath` — never to `fs_basepath` or `fs_cdpath`.
+
+```c
+fileHandle_t FS_FOpenFileWrite( const char *qpath );
+void         FS_Write( const void *buffer, int len, fileHandle_t f );
+void         FS_WriteFile( const char *qpath, const void *buffer, int size );
+void         FS_FCloseFile( fileHandle_t f );
+```
+
+### File listing
+
+```c
+// Returns a list of files in a directory matching an extension
+char **FS_ListFiles( const char *path, const char *extension,
+                     int *numfiles );
+void   FS_FreeFileList( char **list );
+```
+
+## Pure server mode
+
+When `sv_pure 1` is set, the server sends the checksums of all pk3 files it has loaded. Clients must have identical pk3 sets (same files, same checksums). Files found outside pk3 archives are not allowed for pure servers except `q3config.cfg`.
+
+<Note>
+When running a mod server (`fs_game mymood`) in pure mode, both the mod's pk3s and the base pk3s are checksummed. Players must have both installed.
+</Note>
+
+## How mods override base game files
+
+A mod places a pk3 file in a directory named after the mod (e.g., `mymood/pak0.pk3`). Setting `fs_game mymood` on the server (or receiving a `gamestate` from a server with that fs_game) causes the engine to search `mymood/` before `baseq3/`. Any file in `mymood/pak0.pk3` shadows the same path in `baseq3/pak0.pk3`.
+
+<Steps>
+  <Step title="Create the mod directory">
+    Create `baseq3/../mymood/` inside the game installation or home path.
+  </Step>
+  <Step title="Package replacement files">
+    Place replacement assets in a `.pk3` file inside the mod directory. The internal zip path must match the game path exactly (e.g., `models/players/sarge/lower.md3`).
+  </Step>
+  <Step title="Set fs_game">
+    Launch the server with `+set fs_game mymood`. Clients automatically switch to the mod game directory when they connect.
+  </Step>
+</Steps>
+
+## Path restrictions
+
+qpaths (virtual filesystem paths) must not contain `..`, `\\`, or `:`. These characters are rejected by `FS_CheckFilenameIsNotExecutable` and related validators to prevent directory traversal attacks. The maximum path length is `MAX_ZPATH` (256 characters).

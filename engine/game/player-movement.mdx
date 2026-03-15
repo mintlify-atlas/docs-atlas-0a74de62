@@ -1,0 +1,181 @@
+---
+title: Player Movement
+description: The pmove system shared by server and client for authoritative and predicted player movement in Quake III Arena.
+---
+
+Player movement in Quake III Arena is handled by a single function, `Pmove()`, defined in `game/bg_pmove.c` (the `bg_` prefix means "both games" — the code compiles into both the server-side `qagame` and the client-side `cgame`). This shared implementation is fundamental to **client-side prediction**: the client runs the same movement code locally so the player's motion appears instant, while the server independently runs the same code for authority.
+
+## Core structs
+
+### `pmove_t`
+
+The input/output structure passed to `Pmove()`:
+
+```c
+typedef struct {
+    // in/out
+    playerState_t  *ps;
+
+    // input
+    usercmd_t   cmd;          // buttons, movement axes, angles
+    int         tracemask;    // MASK_PLAYERSOLID, etc.
+    qboolean    noFootsteps;
+    qboolean    gauntletHit;  // true if gauntlet would hit something
+
+    // output
+    int         numtouch;
+    int         touchents[MAXTOUCH];  // MAXTOUCH = 32
+    vec3_t      mins, maxs;           // bounding box used this frame
+    int         watertype;
+    int         waterlevel;           // 0, 1, 2, or 3
+    float       xyspeed;
+
+    // callbacks
+    void (*trace)( trace_t *results, const vec3_t start,
+                   const vec3_t mins, const vec3_t maxs,
+                   const vec3_t end, int passEntityNum, int contentMask );
+    int  (*pointcontents)( const vec3_t point, int passEntityNum );
+} pmove_t;
+```
+
+The `trace` and `pointcontents` callbacks are swapped out between game and cgame so the same physics code hits the correct collision world.
+
+### `playerState_t`
+
+The authoritative player state. Key fields relevant to movement:
+
+```c
+// Selected fields from playerState_t
+int         pm_type;           // pmtype_t
+int         pm_flags;          // PMF_* bitmask
+int         pm_time;           // used for various timers
+vec3_t      origin;
+vec3_t      velocity;
+int         gravity;
+int         speed;
+int         groundEntityNum;   // ENTITYNUM_NONE when airborne
+int         jumppad_ent;       // last jump pad touched
+```
+
+## Movement types
+
+```c
+typedef enum {
+    PM_NORMAL,       // standard — can accelerate, turn, jump
+    PM_NOCLIP,       // fly through walls
+    PM_SPECTATOR,    // fly mode, still collides with world
+    PM_DEAD,         // no control, free-falling
+    PM_FREEZE,       // no movement at all
+    PM_INTERMISSION, // scoreboard view
+    PM_SPINTERMISSION
+} pmtype_t;
+```
+
+The active movement type is stored in `ps->pm_type`. Client code branches on this value to select the appropriate sub-mover.
+
+## `Pmove()` execution path
+
+```c
+void Pmove( pmove_t *pmove );
+```
+
+The function sets the global `pm` pointer, updates the internal `pml` (local movement state), then dispatches:
+
+<Steps>
+  <Step title="Update view angles">
+    `PM_UpdateViewAngles()` applies the `usercmd_t` angle deltas to `ps->viewangles`, clamping pitch.
+  </Step>
+  <Step title="Set movement type">
+    Based on `ps->pm_type`, selects `PM_NoclipMove`, `PM_SpectatorMove`, `PM_DeadMove`, or the full `PM_GroundTrace` / `PM_AirMove` / `PM_WaterMove` path.
+  </Step>
+  <Step title="Check water">
+    `PM_SetWaterLevel()` sets `pm->waterlevel` (0–3) and `pm->watertype` (contents flags).
+  </Step>
+  <Step title="Ground detection">
+    `PM_GroundTrace()` fires a short downward trace. If the floor normal is walkable (slope < 45°), `ps->groundEntityNum` is set; otherwise the player is airborne.
+  </Step>
+  <Step title="Move">
+    `PM_GroundMove()`, `PM_AirMove()`, or `PM_WaterMove()` accelerates and slides the velocity vector against geometry using `PM_SlideMove()` (a multi-clip solver).
+  </Step>
+  <Step title="Weapon animation">
+    `PM_Weapon()` advances the weapon state machine (`WEAPON_READY`, `WEAPON_RAISING`, `WEAPON_DROPPING`, `WEAPON_FIRING`).
+  </Step>
+  <Step title="Footsteps and events">
+    `PM_Footstep()` emits `EV_FOOTSTEP` / `EV_FOOTSTEP_METAL` events based on surface flags.
+  </Step>
+</Steps>
+
+## Movement parameters
+
+These module-level floats in `bg_pmove.c` govern physics:
+
+```c
+float pm_stopspeed     = 100.0f;   // deceleration threshold
+float pm_duckScale     = 0.25f;    // crouch speed fraction
+float pm_swimScale     = 0.50f;    // swim speed fraction
+float pm_wadeScale     = 0.70f;    // wade speed fraction
+
+float pm_accelerate    = 10.0f;    // ground acceleration
+float pm_airaccelerate =  1.0f;    // air acceleration (strafejump key)
+float pm_wateraccelerate = 4.0f;
+float pm_flyaccelerate  = 8.0f;    // noclip / spectator
+
+float pm_friction      = 6.0f;     // ground friction
+float pm_waterfriction = 1.0f;
+float pm_flightfriction = 3.0f;
+```
+
+Gravity is `DEFAULT_GRAVITY` (800 units/s²) by default, overrideable by the `g_gravity` cvar.
+
+## Ground movement
+
+On the ground, `PM_Friction()` applies deceleration proportional to `pm_friction`. `PM_Accelerate()` adds velocity in the wish direction up to `g_speed` (320 u/s). The combined velocity is then moved with `PM_StepSlideMove()`, which handles stepping up small ledges (up to `STEPSIZE` = 18 units) automatically.
+
+## Air movement and strafejumping
+
+When airborne, air acceleration is very low (`pm_airaccelerate = 1.0f`). However, because `PM_Accelerate` only caps the speed component in the wish direction, a player can gain speed by angling their movement perpendicular to velocity. This is the mechanical basis for strafejumping: each jump adds a small velocity boost that accumulates over subsequent jumps.
+
+The `PMF_JUMP_HELD` flag prevents holding jump from re-triggering when the player is still on the ground.
+
+## Jumping
+
+Jumping sets an upward velocity of `JUMP_VELOCITY` (270 u/s). The `PMF_TIME_LAND` flag and `pm_time` counter enforce a brief window after landing before the player can jump again (prevents double-jumps from a single button press).
+
+Jump pads (`trigger_push`) call `BG_TouchJumpPad()` which sets a launch velocity and the `EV_JUMP_PAD` event.
+
+## Crouching
+
+When `BUTTON_CROUCH` is held, `PMF_DUCKED` is set. The bounding box shrinks and speed is scaled by `pm_duckScale`. The cvar `CROUCH_VIEWHEIGHT` (12 units) replaces `DEFAULT_VIEWHEIGHT` (26 units).
+
+## Water movement
+
+At `waterlevel >= 2`, `PM_WaterMove()` replaces ground/air physics. Friction is low (`pm_waterfriction = 1.0f`), and vertical movement is fully controllable. At `waterlevel == 3` (fully submerged), the player swims freely in 3D.
+
+## Death movement
+
+`PM_DEAD` disables all control input. The player falls under gravity without friction and without triggering footstep events.
+
+## `pm_flags` reference
+
+```c
+#define PMF_DUCKED          1
+#define PMF_JUMP_HELD       2
+#define PMF_BACKWARDS_JUMP  8      // falling backwards
+#define PMF_BACKWARDS_RUN   16     // coasting backwards
+#define PMF_TIME_LAND       32     // rejump delay active
+#define PMF_TIME_KNOCKBACK  64     // air-accelerate-only window
+#define PMF_TIME_WATERJUMP  256    // water jump in progress
+#define PMF_RESPAWNED       512    // clear after next attack/jump
+#define PMF_GRAPPLE_PULL    2048   // being pulled by grapple
+#define PMF_FOLLOW          4096   // spectator following a player
+```
+
+## Client-side prediction
+
+The client stores recent `usercmd_t` entries in a circular buffer. Each frame it:
+
+1. Receives an authoritative `playerState_t` snapshot from the server.
+2. Re-runs `Pmove()` for all unacknowledged commands from that snapshot forward.
+3. Renders from the predicted position.
+
+Because both sides run identical `Pmove()` code with identical parameters, prediction error appears only from network-induced state differences (telefrags, knockback from other players) rather than from movement logic divergence.

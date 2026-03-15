@@ -1,0 +1,128 @@
+---
+title: 'Bot AI overview'
+description: 'The Botlib architecture, the botlib_export_t interface, bot initialization, and the AI_MainFrame loop.'
+---
+
+Quake III Arena's bot AI is implemented in a separate library — **Botlib** — that is linked into the game code. Game code calls into Botlib through a set of `trap_BotLib*` system calls, and Botlib calls back into the engine through a `botlib_import_t` function table.
+
+## Architecture
+
+```
+  Game QVM (game/)
+       │
+  trap_BotLib* system calls
+       │
+  Botlib (botlib/)
+       │
+  botlib_import_t callbacks
+       │
+  Engine (sv_main.c)
+```
+
+The game QVM never touches AAS data structures directly; everything goes through Botlib's exported API.
+
+## The botlib_export_t interface
+
+Botlib exports its entire API through a `botlib_export_t` structure that is populated when `BotInitializeLibrary` returns. The major sections are:
+
+```c
+typedef struct botlib_export_s {
+    // Area Awareness System
+    aas_export_t    aas;
+    // Elementary Actions (move, look, fire)
+    ea_export_t     ea;
+    // AI subsystems
+    ai_export_t     ai;
+    // Setup
+    int  (*BotLibSetup)( void );
+    int  (*BotLibShutdown)( void );
+    int  (*BotLibVarSet)( char *var_name, char *value );
+    int  (*BotLibVarGet)( char *var_name, char *value, int size );
+    int  (*BotLibStartFrame)( float time );
+    int  (*BotLibLoadMap)( const char *mapname );
+    int  (*BotLibUpdateEntity)( int ent, bot_entitystate_t *state );
+} botlib_export_t;
+```
+
+## Bot initialization
+
+Bots are initialized when the server calls `G_InitBots` at map start (from the game QVM).
+
+<Steps>
+  <Step title="Library setup">
+    `trap_BotLibSetup()` initializes Botlib's internal allocator, the AAS world, and registers console variables for debug output.
+  </Step>
+  <Step title="Load AAS file">
+    `trap_BotLibLoadMap( mapname )` loads the `.aas` file for the current map. This populates the `aasworld` global with areas, faces, reachability links, and cluster portals.
+  </Step>
+  <Step title="Allocate bot state">
+    For each bot slot a `bot_state_t` is allocated via `BotAI_Setup`. This structure holds the bot's chat state, goal state, movement state, and weapon state handles — each returned by a corresponding `trap_BotLoad*` call.
+
+    ```c
+    bs->cs  = trap_BotAllocChatState();
+    bs->gs  = trap_BotAllocGoalState( ent->s.number );
+    bs->rs  = trap_BotAllocWeaponState();
+    bs->ms  = trap_BotAllocMoveState();
+    ```
+  </Step>
+  <Step title="Load personality">
+    `trap_BotLoadCharacter( filename, skill )` loads a `.c` character file that defines personality parameters: aggression, chat frequency, aim accuracy, and more. Skill ranges from 1 (easy) to 5 (nightmare).
+  </Step>
+</Steps>
+
+## The AI main loop
+
+Each server tick `SV_BotFrame` calls into the game QVM, which dispatches to `BotAIStartFrame` in `ai_main.c`.
+
+```c
+// game/ai_main.c
+int BotAIStartFrame( int time );
+```
+
+For each active bot, `BotAIStartFrame` calls the per-bot think function:
+
+```c
+void BotAI( int client, float thinktime );  // ai_main.c
+```
+
+The per-bot loop:
+
+<Steps>
+  <Step title="Update entity states">
+    `trap_BotLibUpdateEntity` pushes the current server entity state into Botlib so the AAS and movement subsystems have up-to-date positions.
+  </Step>
+  <Step title="Update bot info">
+    The bot reads its own `playerState_t` and nearby entity states through `BotAI_GetClientState` and `BotAI_GetSnapshotEntity`.
+  </Step>
+  <Step title="Choose game type AI">
+    Based on `gametype`, the bot dispatches to a game-specific AI function in `ai_dmq3.c` (FFA/Tourney), `ai_dmnet.c` (CTF/team), or `ai_team.c`.
+  </Step>
+  <Step title="Execute elementary actions">
+    The result is a set of **elementary actions** (EA): `EA_Move`, `EA_Attack`, `EA_Jump`, `EA_Crouch`, etc. These are translated into a `usercmd_t` and injected into the server's user command queue.
+  </Step>
+</Steps>
+
+## Bot difficulty levels
+
+The `skill` parameter passed to `trap_BotLoadCharacter` controls the personality file and AI parameters loaded.
+
+| Skill | Level name | Behavior |
+|---|---|---|
+| 1 | I can win | Slow reaction, poor aim, limited item awareness |
+| 2 | Bring it on | Moderate aim, basic item pickup |
+| 3 | Hurt me plenty | Good aim, uses powerups |
+| 4 | Hardcore | Very good aim, proactive item chasing |
+| 5 | Nightmare | Near-perfect aim, full item and weapon knowledge |
+
+Personality parameters such as `reactiontime`, `accuracy`, and `weaponweights` are all defined in the character files and can differ between personality types (e.g. `sarge.c`, `orbb.c`).
+
+## Debug CVars
+
+| CVar | Description |
+|---|---|
+| `bot_developer` | Enable verbose Botlib debug output |
+| `bot_report` | Print per-bot report each frame |
+| `bot_pause` | Freeze all bot AI |
+| `bot_thinktime` | Override per-bot think interval (ms) |
+| `bot_testsolid` | Visualize AAS solid areas |
+| `bot_testclusters` | Visualize AAS cluster portals |

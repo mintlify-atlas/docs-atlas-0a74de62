@@ -1,0 +1,140 @@
+---
+title: Game Types
+description: All game modes in Quake III Arena and Team Arena — rules, scoring, and selection via the g_gametype cvar.
+---
+
+Game types are defined in `game/bg_public.h` and selected with the `g_gametype` cvar:
+
+```c
+typedef enum {
+    GT_FFA,           // 0 — Free For All
+    GT_TOURNAMENT,    // 1 — 1v1 Tournament
+    GT_SINGLE_PLAYER, // 2 — Single Player campaign
+    GT_TEAM,          // 3 — Team Deathmatch
+    GT_CTF,           // 4 — Capture the Flag
+    GT_1FCTF,         // 5 — One Flag CTF
+    GT_OBELISK,       // 6 — Overload
+    GT_HARVESTER,     // 7 — Harvester
+    GT_MAX_GAME_TYPE
+} gametype_t;
+```
+
+The cvar is declared with `CVAR_SERVERINFO | CVAR_USERINFO | CVAR_LATCH`, meaning it is broadcast to clients and takes effect only at map change.
+
+```bash
+# Set game type on the server
+seta g_gametype 4    # Capture the Flag
+map q3ctf1
+```
+
+## Game type reference
+
+<CardGroup cols={2}>
+  <Card title="GT_FFA (0)" icon="skull">
+    **Free For All**
+
+    Every player fights every other. A frag scores +1 for the killer and -1 for a team kill. Suicide is -1.
+
+    **Win condition:** First player to reach `fraglimit` (default 20) or highest score when `timelimit` expires.
+  </Card>
+
+  <Card title="GT_TOURNAMENT (1)" icon="trophy">
+    **1v1 Tournament**
+
+    Exactly two players fight; others wait in a queue. `AddTournamentPlayer()` pulls the next spectator in line when a slot opens.
+
+    **Win condition:** First to `fraglimit`. Winner stays; loser returns to queue end.
+  </Card>
+
+  <Card title="GT_SINGLE_PLAYER (2)" icon="user">
+    **Single Player**
+
+    PvE against bot opponents in a tiered arena structure. Bots are spawned automatically. The podium model (`SP_PODIUM_MODEL`) is shown at end.
+
+    **Win condition:** Reach `fraglimit` before the bot opponents do.
+  </Card>
+
+  <Card title="GT_TEAM (3)" icon="users">
+    **Team Deathmatch**
+
+    Two teams (Red and Blue). Frags score points for the killer's team via `level.teamScores[]`. Friendly fire is controlled by `g_friendlyFire`.
+
+    **Win condition:** First team to `fraglimit` or leading team when `timelimit` expires.
+  </Card>
+
+  <Card title="GT_CTF (4)" icon="flag">
+    **Capture the Flag**
+
+    Classic two-flag CTF. Each team has a flag at their base. Capture the enemy flag while your flag is home to score.
+
+    **Win condition:** First team to `capturelimit` (default 8) captures.
+  </Card>
+
+  <Card title="GT_1FCTF (5)" icon="flag">
+    **One Flag CTF** *(Team Arena)*
+
+    A single neutral flag spawns in the center. Teams must grab it and carry it to the enemy base.
+
+    **Win condition:** First team to `capturelimit` captures.
+  </Card>
+
+  <Card title="GT_OBELISK (6)" icon="building">
+    **Overload** *(Team Arena)*
+
+    Each team defends an Obelisk structure. Teams attack the enemy Obelisk; health is tracked via `g_obeliskHealth`. The Obelisk regenerates over time (`g_obeliskRegenPeriod`, `g_obeliskRegenAmount`).
+
+    **Win condition:** Destroy the enemy Obelisk `capturelimit` times.
+  </Card>
+
+  <Card title="GT_HARVESTER (7)" icon="cube">
+    **Harvester** *(Team Arena)*
+
+    A neutral Obelisk in the center drops skulls when killed. Players pick up enemy skulls and return them to the neutral obelisk base for points. Skulls are tossed on player death via `TossClientCubes()`.
+
+    **Win condition:** First team to `capturelimit` skull deposits.
+  </Card>
+</CardGroup>
+
+## Scoring details
+
+### Individual score
+
+`AddScore( gentity_t *ent, vec3_t origin, int score )` adds to `ps->persistant[PERS_SCORE]` and updates team scores for team games. A floating score plum (`EV_SCOREPLUM`) is sent to the scoring player for visual feedback.
+
+### Team score tracking
+
+For team modes (`g_gametype >= GT_TEAM`), `level.teamScores[TEAM_RED]` and `level.teamScores[TEAM_BLUE]` accumulate. These are broadcast via config strings `CS_SCORES1` and `CS_SCORES2`.
+
+### Flag status (`CS_FLAGSTATUS`)
+
+In CTF modes the `CS_FLAGSTATUS` config string encodes flag state as a compact string read by the client HUD. States per flag: at base, carried, dropped.
+
+## Per-mode item requirements
+
+`G_CheckTeamItems()` runs after entity spawning for `g_gametype >= GT_TEAM` and verifies that required items exist in the map:
+
+| Mode | Required items |
+|---|---|
+| `GT_CTF` | Red flag (`team_CTF_redflag`), Blue flag (`team_CTF_blueflag`) |
+| `GT_1FCTF` | Neutral flag (`team_CTF_neutralflag`) |
+| `GT_OBELISK` | Red obelisk, Blue obelisk |
+| `GT_HARVESTER` | Red obelisk, Blue obelisk, Neutral obelisk |
+
+## Warmup
+
+All modes support a warmup period before the match starts. `g_doWarmup` enables it, and `g_warmup` (default 20 s) sets the countdown. During warmup, `level.warmupTime` is non-zero and `AddScore()` does not register points.
+
+## Related cvars
+
+| Cvar | Default | Applies to |
+|---|---|---|
+| `g_gametype` | `0` | All |
+| `fraglimit` | `20` | FFA, Tournament, Team, Single Player |
+| `timelimit` | `0` | All (0 = disabled) |
+| `capturelimit` | `8` | CTF, 1FCTF, Obelisk, Harvester |
+| `g_friendlyFire` | `0` | Team, CTF, and team variants |
+| `g_teamAutoJoin` | `0` | Auto-assigns players to teams |
+| `g_teamForceBalance` | `0` | Prevents uneven teams |
+| `g_obeliskHealth` | — | Obelisk starting HP |
+| `g_obeliskRegenPeriod` | — | Obelisk HP regen interval (ms) |
+| `g_obeliskRegenAmount` | — | HP restored per regen tick |

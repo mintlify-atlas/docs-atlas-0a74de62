@@ -1,0 +1,146 @@
+---
+title: q3map
+description: The BSP map compiler for Quake III Arena. Converts .map brush geometry files to .bsp files through BSP, visibility, and lighting passes.
+---
+
+`q3map` is the map compiler included with Q3Radiant 200f. It converts Quake `.map` text files — which describe a level's brush geometry, patch meshes, and entity placements — into the binary `.bsp` format that the Quake III engine loads at runtime.
+
+Source: `q3map/` (36 source files)
+
+---
+
+## Compilation stages
+
+A complete map compilation runs three separate passes. Each pass reads the current `.bsp` and writes an updated version:
+
+<Steps>
+  <Step title="BSP (-bsp)">
+    Processes brush geometry. Splits the world into a binary space partition tree, generates surfaces, computes area portals, and writes the initial `.bsp`.
+
+    ```bash
+    q3map -bsp maps/mymap.map
+    ```
+  </Step>
+  <Step title="Visibility (-vis)">
+    Calculates the potentially-visible set (PVS) for every leaf cluster. Writes visibility data back into the `.bsp`. This is typically the slowest pass.
+
+    ```bash
+    q3map -vis maps/mymap.bsp
+    ```
+  </Step>
+  <Step title="Lighting (-light)">
+    Traces rays for radiosity lighting. Bakes the results into lightmaps and stores them in the `.bsp`.
+
+    ```bash
+    q3map -light maps/mymap.bsp
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+During development you can skip `-vis` and `-light` to get faster iteration times. The engine will run without visibility or lightmap data, though rendering will be slower and the level will be fully lit.
+</Tip>
+
+---
+
+## Source file overview
+
+The key source files and their responsibilities:
+
+| File | Purpose |
+|------|---------|
+| `bsp.c` | Main BSP compilation entry point |
+| `map.c` | Parses `.map` text format, loads brush / entity data |
+| `brush.c` | Brush operations: clipping, winding generation |
+| `brush_primit.c` | Brush primitive (texture-locked) brush support |
+| `facebsp.c` | Splits faces against BSP tree planes |
+| `tree.c` | BSP tree construction |
+| `portals.c` | Area portal computation |
+| `vis.c` / `visflow.c` | Visibility (PVS) flood-fill |
+| `light.c` / `light_trace.c` | Ray-traced and radiosity lighting |
+| `lightmaps.c` | Lightmap atlas allocation and storage |
+| `lightv.c` | Vertex lighting |
+| `surface.c` | Surface (face) generation |
+| `patch.c` | Bézier patch mesh tessellation |
+| `mesh.c` | Triangle mesh utilities |
+| `terrain.c` | Terrain brush handling |
+| `shaders.c` / `shaders.h` | Shader parsing (surface flags, contents) |
+| `fog.c` | Fog volume brushes |
+| `misc_model.c` | Inline model / `misc_model` entity compilation |
+| `tjunction.c` | T-junction elimination |
+| `nodraw.c` | `nodraw` surface culling |
+| `writebsp.c` | Serialises the in-memory BSP to disk |
+| `prtfile.c` | Writes `.prt` portal file (used by `-vis`) |
+| `leakfile.c` | Writes `.lin` leak-trace file |
+| `glfile.c` / `gldraw.c` | OpenGL debug visualisation |
+| `soundv.c` | Sound volume brush processing |
+
+---
+
+## What goes into a .bsp file
+
+After all three passes the `.bsp` contains:
+
+- **Planes** — the set of half-space planes used to partition the world.
+- **Nodes and leaves** — the BSP tree nodes; leaves hold surface references and cluster indices.
+- **Surfaces / faces** — planar polygons, patch meshes, and inline models.
+- **Cluster visibility** — the PVS bitsets added by `-vis`.
+- **Lightmaps** — per-texel direct and radiosity light values added by `-light`.
+- **Entities** — the entity list (spawn points, lights, triggers, etc.).
+- **Shaders** — texture / material name references.
+- **Models** — inline brush models (doors, platforms).
+
+---
+
+## Key features
+
+### Radiosity lighting
+
+`light.c` implements a radiosity lighting model. Light bounces between surfaces, producing soft indirect illumination. The `-light` pass also supports:
+
+- Point lights (from `light` entities)
+- Surface-emissive lights (`_surface` shaders with `surfacelight`)
+- Sky portals for sun/sky lighting
+
+### Area portals
+
+`portals.c` computes area portals from `areaportal` brushes in the map. The engine uses these at runtime to cull rendering and audio between connected areas.
+
+### Hint brushes
+
+Brushes textured with `hint` direct the BSP splitter, allowing mappers to manually control how the tree is structured and reduce overdraw.
+
+### Patch meshes
+
+`patch.c` tessellates Bézier patch meshes into triangle geometry during the `-bsp` pass.
+
+### Terrain
+
+`terrain.c` handles the Q3A terrain brush format, which stores height-map-like deformation data directly in the brush definition.
+
+---
+
+## Shader parsing
+
+q3map reads shader scripts (`.shader` files) from `scripts/` to determine surface properties:
+
+- `surfaceparm` flags (solid, sky, water, lava, slime, nonsolid, …)
+- `q3map_` prefixed directives that control compilation behaviour (light emission, back-face culling, clipping, etc.)
+
+The parsing code is in `shaders.c`.
+
+---
+
+## Building q3map
+
+<Tabs>
+  <Tab title="Windows">
+    Open `q3map/q3map.sln` in Visual C++ 2003 and build.
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    cd q3map
+    make
+    ```
+  </Tab>
+</Tabs>

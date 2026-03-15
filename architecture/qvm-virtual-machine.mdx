@@ -1,0 +1,338 @@
+---
+title: "QVM Virtual Machine"
+description: "Deep dive into the Quake Virtual Machine: architecture, execution modes, the vm_t struct, system calls, and how .qvm files are loaded."
+---
+
+The Quake Virtual Machine (QVM) is a custom stack-based bytecode virtual machine used to isolate game logic from the engine. All three game modules — `qagame.qvm`, `cgame.qvm`, and `ui.qvm` — run inside it. The implementation lives in `code/qcommon/vm.c`, `vm_interpreted.c`, and `vm_x86.c`.
+
+## Why QVM Exists
+
+Two problems motivated the QVM:
+
+1. **Portability** — A single `.qvm` file produces identical game behaviour on Linux, Windows, and macOS without recompiling. The engine handles all platform differences.
+2. **Sandboxing** — Clients connect to servers they do not control. Running game code as native DLLs would allow malicious servers to execute arbitrary OS calls. The QVM has no direct access to `libc`, the filesystem, or the network — only the trap interface the engine explicitly provides.
+
+<Note>
+The engine can also load game modules as native DLLs (`VMI_NATIVE`) for maximum performance, but this mode is disabled when `fs_restrict` is set (e.g., demo mode). See `VM_Create` in `vm.c:476`.
+</Note>
+
+---
+
+## Execution Modes
+
+The `vmInterpret_t` enum (defined in `qcommon.h`) selects the execution mode:
+
+```c
+// qcommon.h
+typedef enum {
+    VMI_NATIVE,    // load as native DLL via Sys_LoadDll
+    VMI_BYTECODE,  // pure C interpreter (VM_CallInterpreted)
+    VMI_COMPILED   // x86 JIT compiler  (VM_Compile / VM_CallCompiled)
+} vmInterpret_t;
+```
+
+The cvars `vm_game`, `vm_cgame`, and `vm_ui` default to `2` (compiled/JIT) and are set in `VM_Init`:
+
+```c
+// vm.c: VM_Init
+void VM_Init( void ) {
+    Cvar_Get( "vm_cgame", "2", CVAR_ARCHIVE );  // !@# SHIP WITH SET TO 2
+    Cvar_Get( "vm_game",  "2", CVAR_ARCHIVE );  // !@# SHIP WITH SET TO 2
+    Cvar_Get( "vm_ui",    "2", CVAR_ARCHIVE );  // !@# SHIP WITH SET TO 2
+    // ...
+}
+```
+
+### VMI_NATIVE
+
+The engine calls `Sys_LoadDll` to load a platform-native shared library (`qagame.so`, `qagame.dll`, etc.). The library exports a single `vmMain` entry point. This mode gives native performance but gives up sandboxing.
+
+### VMI_BYTECODE (interpreted)
+
+`VM_PrepareInterpreter` expands the raw QVM bytecode into an integer array for faster dispatch, then `VM_CallInterpreted` runs it in a C `while(1)/switch` loop. Registers `esi` / `edi` in the implementation notes map to the program stack and operand stack:
+
+```c
+// vm_interpreted.c: VM_CallInterpreted (simplified)
+int VM_CallInterpreted( vm_t *vm, int *args ) {
+    int  stack[MAX_STACK];  // operand stack
+    int *opStack  = stack;
+    int  programCounter = 0;
+    int  programStack   = vm->programStack;
+    byte *image     = vm->dataBase;
+    int  *codeImage = (int *)vm->codeBase;
+
+    // push initial arguments onto the VM stack
+    programStack -= 48;
+    *(int *)&image[programStack + 8] = args[0];
+    // ... args[1..9] ...
+    *(int *)&image[programStack] = -1;  // sentinel: terminate on LEAVE
+
+    while ( 1 ) {
+        int opcode = codeImage[programCounter++];
+        switch ( opcode ) {
+        case OP_CONST:
+            *++opStack = codeImage[programCounter];
+            programCounter += 4;
+            break;
+        case OP_ADD:
+            opStack--;
+            *opStack += *(opStack+1);
+            break;
+        // ... all 60+ opcodes ...
+        }
+    }
+}
+```
+
+### VMI_COMPILED (x86 JIT)
+
+`VM_Compile` makes two passes over the QVM bytecode. The first pass calculates code sizes; the second emits x86 machine code into a buffer allocated from the hunk. The `AsmCall` stub (written in inline assembly) handles the boundary between JIT code and system calls:
+
+```c
+// vm_x86.c register allocation convention:
+//   esi  →  program stack pointer
+//   edi  →  operand stack pointer
+//   eax/ebx/ecx/edx  →  scratch
+
+// When the JIT code hits a syscall (negative call number), AsmCall:
+// 1. Negates the call number to get the syscall index.
+// 2. Saves esi/edi.
+// 3. Calls currentVM->systemCall() with the argument array.
+// 4. Restores esi/edi and places the return value on the op stack.
+```
+
+A PPC JIT was also supported (Mac/Linux PPC) but its source is not included in this GPL release.
+
+---
+
+## The `vm_t` Struct
+
+Every loaded QVM module is represented by a `vm_t` (defined in `vm_local.h`):
+
+```c
+// vm_local.h
+struct vm_s {
+    // IMPORTANT: programStack and systemCall must stay at offsets
+    // VM_OFFSET_PROGRAM_STACK (0) and VM_OFFSET_SYSTEM_CALL (4)
+    // because the JIT-generated code references them directly.
+    int     programStack;          // current VM stack pointer
+    int     (*systemCall)( int *parms );  // engine syscall handler
+
+    char    name[MAX_QPATH];       // "cgame", "qagame", "ui"
+
+    // native DLL mode
+    void   *dllHandle;
+    int     (QDECL *entryPoint)( int callNum, ... );
+
+    // interpreted / JIT mode
+    qboolean currentlyInterpreting;
+    qboolean compiled;             // qtrue if JIT-compiled
+    byte    *codeBase;             // compiled/prepped code
+    int      codeLength;
+    int     *instructionPointers;  // opcode index → code offset map
+    int      instructionPointersLength;
+
+    byte    *dataBase;             // VM heap/stack memory block
+    int      dataMask;             // power-of-2 mask for bounds checking
+
+    int      stackBottom;          // overflow guard
+
+    // debug / profiling
+    int           numSymbols;
+    vmSymbol_t   *symbols;
+    int           callLevel;
+    int           breakFunction;
+    int           breakCount;
+
+    char    fqpath[MAX_QPATH+1];   // fully-qualified path of loaded file
+};
+```
+
+<Tip>
+The `dataMask` field is why QVM data segments are rounded up to the next power of two in `VM_Create`. Every memory access inside the VM is masked: `image[address & dataMask]`, preventing out-of-bounds reads/writes.
+</Tip>
+
+---
+
+## Loading a .qvm File
+
+`VM_Create` in `vm.c` handles the complete load sequence:
+
+```c
+// vm.c: VM_Create
+vm_t *VM_Create( const char *module,
+                 int (*systemCalls)(int *),
+                 vmInterpret_t interpret ) {
+    // 1. Find a free slot in vmTable[MAX_VM] (max 3 VMs)
+    // 2. If VMI_NATIVE, try Sys_LoadDll first; fall back to QVM on failure
+    // 3. Load "vm/<module>.qvm" via FS_ReadFile
+    // 4. Validate the vmHeader_t magic (VM_MAGIC)
+    // 5. Round dataLength up to next power of 2 for mask protection
+    // 6. Allocate vm->dataBase from hunk (dataLength bytes)
+    // 7. Copy initialised data + literals into dataBase
+    // 8. Byte-swap multi-byte values for cross-endian portability
+    // 9. Allocate instructionPointers array
+    // 10. If VMI_COMPILED: VM_Compile(vm, header)  [x86 JIT]
+    //     else:            VM_PrepareInterpreter(vm, header)
+    // 11. Load symbol map from "vm/<module>.map" (developer mode only)
+    // 12. Set programStack = dataMask + 1; stackBottom = programStack - STACK_SIZE
+    return vm;
+}
+```
+
+### QVM File Format
+
+The `.qvm` file begins with a `vmHeader_t`:
+
+```c
+// From qcommon.h (referenced in vm.c header validation)
+#define VM_MAGIC  0x12721444
+
+typedef struct {
+    int vmMagic;          // VM_MAGIC
+    int instructionCount;
+    int codeOffset;       // byte offset of code segment in file
+    int codeLength;
+    int dataOffset;       // byte offset of data segment
+    int dataLength;       // initialised data
+    int litLength;        // string literals (appended to dataLength)
+    int bssLength;        // uninitialised data (zeroed at load)
+} vmHeader_t;
+```
+
+---
+
+## How System Calls Work
+
+System calls are how game code requests engine services. From inside QVM bytecode, a system call appears as a call to a negative function number. The VM dispatcher catches it and routes it to the engine's handler.
+
+### Interpreted path
+
+```c
+// vm_interpreted.c: inside VM_CallInterpreted switch
+case OP_CALL:
+    if ( r0 < 0 ) {
+        // negative → system call
+        // r0 == -(syscall_number + 1)
+        // push syscall number into VM data at programStack+4
+        // then call:
+        *(int *)&image[programStack + 4] = -1 - r0;
+        // ...
+        *opStack = vm->systemCall( (int *)&image[programStack + 4] );
+    } else {
+        // positive → call another QVM function
+        // set programCounter = instructionPointers[r0]
+    }
+```
+
+### JIT / DLL path
+
+For the x86 JIT, `AsmCall` (an inline-assembly stub in `vm_x86.c`) intercepts negative calls:
+
+```c
+// vm_x86.c: AsmCall (Windows version, simplified)
+__declspec(naked) void AsmCall( void ) {
+    // if call target >= 0: indirect call via instructionPointers[target]
+    // if call target <  0: system call path:
+    //   neg eax; dec eax  → convert to positive syscall index
+    //   store syscallNum, programStack, opStack
+    //   call currentVM->systemCall( dataBase + programStack + 4 )
+    //   place return value on op stack
+}
+```
+
+For native DLL mode, `VM_DllSyscall` bridges the C varargs convention to the flat integer array the engine expects:
+
+```c
+// vm.c
+int QDECL VM_DllSyscall( int arg, ... ) {
+    // On most platforms:
+    return currentVM->systemCall( &arg );
+    // (On Linux PPC, args are copied to an array first because
+    //  varargs may not be contiguous on the stack.)
+}
+```
+
+---
+
+## Calling Into the QVM: `VM_Call`
+
+The engine calls game module entry points through `VM_Call`:
+
+```c
+// vm.c: VM_Call
+int QDECL VM_Call( vm_t *vm, int callNum, ... ) {
+    vm_t *oldVM = currentVM;
+    currentVM = vm;
+
+    if ( vm->entryPoint ) {
+        // Native DLL: call entryPoint directly
+        r = vm->entryPoint( callNum, arg0, arg1, ... );
+    } else if ( vm->compiled ) {
+        // JIT: VM_CallCompiled
+        r = VM_CallCompiled( vm, &callNum );
+    } else {
+        // Interpreted: VM_CallInterpreted
+        r = VM_CallInterpreted( vm, &callNum );
+    }
+
+    currentVM = oldVM;
+    return r;
+}
+```
+
+The VM may call back into the engine (via a system call) which may in turn call `VM_Call` again, so `currentVM` is saved and restored to support re-entrancy.
+
+---
+
+## Opcode Set
+
+The QVM instruction set is defined in `vm_local.h`. It is a simple 32-bit stack machine:
+
+```c
+// vm_local.h: opcode_t (selected)
+typedef enum {
+    OP_UNDEF, OP_IGNORE, OP_BREAK,
+    OP_ENTER, OP_LEAVE, OP_CALL,   // function call / return
+    OP_PUSH,  OP_POP,
+    OP_CONST, OP_LOCAL,            // push constant / local address
+    OP_JUMP,                       // unconditional branch
+    OP_EQ, OP_NE,                  // integer compare + branch
+    OP_LTI, OP_LEI, OP_GTI, OP_GEI,
+    OP_LTU, OP_LEU, OP_GTU, OP_GEU,
+    OP_EQF, OP_NEF,                // float compare + branch
+    OP_LTF, OP_LEF, OP_GTF, OP_GEF,
+    OP_LOAD1, OP_LOAD2, OP_LOAD4,  // memory read (1/2/4 bytes)
+    OP_STORE1, OP_STORE2, OP_STORE4, // memory write
+    OP_ARG,                        // push function argument
+    OP_BLOCK_COPY,                 // memcpy within VM data
+    OP_SEX8, OP_SEX16,             // sign extend
+    OP_NEGI, OP_ADD, OP_SUB,       // integer arithmetic
+    OP_DIVI, OP_DIVU, OP_MODI, OP_MODU,
+    OP_MULI, OP_MULU,
+    OP_BAND, OP_BOR, OP_BXOR, OP_BCOM, // bitwise
+    OP_LSH,  OP_RSHI, OP_RSHU,     // shifts
+    OP_NEGF, OP_ADDF, OP_SUBF,     // float arithmetic
+    OP_DIVF, OP_MULF,
+    OP_CVIF, OP_CVFI               // int↔float conversion
+} opcode_t;
+```
+
+---
+
+## Debugging and Profiling
+
+When `com_developer 1` is set:
+
+- `VM_LoadSymbols` reads `vm/<module>.map` and populates the `vm->symbols` linked list. Each `vmSymbol_t` records a function name and its instruction-number.
+- `VM_ValueToSymbol` converts a program counter value to a human-readable `function+offset` string.
+- The `vminfo` console command (registered in `VM_Init`) prints the loaded VMs, their execution mode, and memory sizes.
+- The `vmprofile` command sorts and prints per-function instruction counts.
+
+```c
+// vm.c: VM_VmInfo_f output example
+// "cgame : compiled on load"
+// "    code length :  123456"
+// "    table length:    4096"
+// "    data length :  262144"
+```

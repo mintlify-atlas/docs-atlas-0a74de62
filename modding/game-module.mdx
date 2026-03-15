@@ -1,0 +1,311 @@
+---
+title: "Game module"
+description: "Comprehensive guide to modding qagame.qvm: the gameExport_t and gameImport_t interfaces, adding weapons, modifying physics, custom game types, and entity fields."
+---
+
+The game module (`qagame.qvm`) is the server-side heart of Quake III Arena. Every authoritative decision — who is dead, what the score is, where items spawn — is made here. This guide covers the full interface between the engine and the game module, and how to extend it.
+
+## Module entry point
+
+All calls from the engine into the game module pass through a single `vmMain` function defined in `code/game/g_main.c`:
+
+```c
+// code/game/g_main.c:203
+int vmMain( int command, int arg0, int arg1, int arg2,
+            int arg3, int arg4, int arg5, int arg6,
+            int arg7, int arg8, int arg9, int arg10, int arg11 ) {
+    switch ( command ) {
+    case GAME_INIT:              G_InitGame( arg0, arg1, arg2 );      return 0;
+    case GAME_SHUTDOWN:          G_ShutdownGame( arg0 );              return 0;
+    case GAME_CLIENT_CONNECT:    return (int)ClientConnect( arg0, arg1, arg2 );
+    case GAME_CLIENT_BEGIN:      ClientBegin( arg0 );                 return 0;
+    case GAME_CLIENT_USERINFO_CHANGED: ClientUserinfoChanged( arg0 ); return 0;
+    case GAME_CLIENT_DISCONNECT: ClientDisconnect( arg0 );            return 0;
+    case GAME_CLIENT_COMMAND:    ClientCommand( arg0 );               return 0;
+    case GAME_CLIENT_THINK:      ClientThink( arg0 );                 return 0;
+    case GAME_RUN_FRAME:         G_RunFrame( arg0 );                  return 0;
+    case GAME_CONSOLE_COMMAND:   return ConsoleCommand();
+    case BOTAI_START_FRAME:      return BotAIStartFrame( arg0 );
+    }
+    return -1;
+}
+```
+
+The `command` values are defined in the `gameExport_t` enum in `code/game/g_public.h`.
+
+## gameExport_t — functions the engine calls
+
+These are the callbacks the engine invokes on the game module:
+
+| Entry point | Signature | Description |
+|---|---|---|
+| `GAME_INIT` | `G_InitGame(levelTime, randomSeed, restart)` | Called once when a level loads. Parse entities, register CVars, initialize bots. |
+| `GAME_SHUTDOWN` | `G_ShutdownGame(restart)` | Called when the server shuts down or changes maps. Write session data, shut down bots. |
+| `GAME_CLIENT_CONNECT` | `ClientConnect(clientNum, firstTime, isBot)` | Called when a client connects. Return a denial string to reject, or `NULL` to allow. |
+| `GAME_CLIENT_BEGIN` | `ClientBegin(clientNum)` | Called after connect when the client enters the world for the first time. |
+| `GAME_CLIENT_USERINFO_CHANGED` | `ClientUserinfoChanged(clientNum)` | Called when the client's userinfo string changes (name, model, etc.). |
+| `GAME_CLIENT_DISCONNECT` | `ClientDisconnect(clientNum)` | Called when a client leaves. Clean up client-owned entities. |
+| `GAME_CLIENT_COMMAND` | `ClientCommand(clientNum)` | A client sent a command string. Read it with `trap_Argc`/`trap_Argv`. |
+| `GAME_CLIENT_THINK` | `ClientThink(clientNum)` | Process a `usercmd_t` for this client for this frame. |
+| `GAME_RUN_FRAME` | `G_RunFrame(levelTime)` | Run one server frame: advance entities, check exit rules, run timers. |
+| `GAME_CONSOLE_COMMAND` | `ConsoleCommand()` | A console command was not recognized by the engine. Return `qtrue` if handled. |
+| `BOTAI_START_FRAME` | `BotAIStartFrame(time)` | Called each frame so the bot AI can run its decision loop. |
+
+### G_InitGame
+
+```c
+void G_InitGame( int levelTime, int randomSeed, int restart ) {
+    srand( randomSeed );          // seed random number generator
+    G_RegisterCvars();            // register all game CVars
+    G_ProcessIPBans();
+    G_InitMemory();
+    memset( &level, 0, sizeof(level) );
+    level.time = levelTime;
+    // ...
+    G_SpawnEntitiesFromString(); // parse BSP entity lump and call spawn functions
+    G_FindTeams();               // link team-entity chains
+    if ( trap_Cvar_VariableIntegerValue("bot_enable") ) {
+        BotAISetup( restart );
+        BotAILoadMap( restart );
+        G_InitBots( restart );
+    }
+}
+```
+
+### G_RunFrame
+
+`G_RunFrame` is called approximately 20 times per second (every 50 ms) by the server. It:
+1. Calls `G_UpdateCvars()` to pick up any CVar changes.
+2. Iterates `g_entities[]`, advancing missiles, items, movers, and client entities.
+3. Calls `ClientEndFrame` for each connected client.
+4. Checks exit rules (`CheckExitRules`), tournament state, vote timers, and team status.
+
+## gameImport_t — syscalls available to game code
+
+These are the engine functions the game module calls through the `trap_*` interface (defined in `code/game/g_syscalls.c`):
+
+### Entity management
+
+```c
+// Register entity/client data layout with the server
+void trap_LocateGameData(
+    gentity_t *gEnts, int numGEntities, int sizeofGEntity_t,
+    playerState_t *clients, int sizeofGClient );
+
+// Add/remove entity from collision world
+void trap_LinkEntity( gentity_t *ent );
+void trap_UnlinkEntity( gentity_t *ent );
+
+// Spatial queries
+void trap_Trace( trace_t *results, const vec3_t start,
+                 const vec3_t mins, const vec3_t maxs,
+                 const vec3_t end, int passEntityNum, int contentmask );
+int  trap_PointContents( const vec3_t point, int passEntityNum );
+int  trap_EntitiesInBox( const vec3_t mins, const vec3_t maxs,
+                         int *list, int maxcount );
+qboolean trap_InPVS( const vec3_t p1, const vec3_t p2 );
+
+// Brush model
+void trap_SetBrushModel( gentity_t *ent, const char *name );
+```
+
+### Client communication
+
+```c
+// Send a reliable text command to one client, or -1 for all
+void trap_SendServerCommand( int clientNum, const char *text );
+
+// Kick a client
+void trap_DropClient( int clientNum, const char *reason );
+
+// Read/write client's userinfo string
+void trap_GetUserinfo( int num, char *buffer, int bufferSize );
+void trap_SetUserinfo( int num, const char *buffer );
+
+// Read a usercmd (input frame) from a client
+void trap_GetUsercmd( int clientNum, usercmd_t *cmd );
+```
+
+### Config strings
+
+Config strings are the primary mechanism for broadcasting server state to all clients. They are sent reliably on connect and whenever they change.
+
+```c
+void trap_SetConfigstring( int num, const char *string );
+void trap_GetConfigstring( int num, char *buffer, int bufferSize );
+```
+
+Index ranges are defined in `code/game/bg_public.h`: `CS_MODELS`, `CS_SOUNDS`, `CS_PLAYERS`, etc.
+
+## How to add a new weapon
+
+Adding a weapon requires changes across several files:
+
+<Steps>
+  <Step title="Add the weapon constant">
+    In `code/game/bg_public.h`, add your weapon to the `weapon_t` enum **before** `WP_NUM_WEAPONS`:
+
+    ```c
+    typedef enum {
+        WP_NONE,
+        WP_GAUNTLET,
+        // ... existing weapons ...
+        WP_MY_NEW_WEAPON,   // add here
+        WP_NUM_WEAPONS
+    } weapon_t;
+    ```
+  </Step>
+
+  <Step title="Define the weapon's fire function">
+    Create a fire function in `code/game/g_weapon.c` following the pattern of existing weapons:
+
+    ```c
+    static void FireMyNewWeapon( gentity_t *ent ) {
+        gentity_t *bolt;
+        vec3_t    forward, right, up, muzzle;
+
+        AngleVectors( ent->client->ps.viewangles, forward, right, up );
+        CalcMuzzlePoint( ent, forward, right, up, muzzle );
+
+        bolt = G_Spawn();
+        bolt->classname   = "myweapon_proj";
+        bolt->nextthink   = level.time + 10000;
+        bolt->think       = G_ExplodeMissile;
+        bolt->s.eType     = ET_MISSILE;
+        bolt->r.svFlags   = SVF_USE_CURRENT_ORIGIN;
+        bolt->s.weapon    = WP_MY_NEW_WEAPON;
+        bolt->r.ownerNum  = ent->s.number;
+        bolt->parent      = ent;
+        bolt->damage      = 100;
+        bolt->splashDamage = 80;
+        bolt->splashRadius = 120;
+        bolt->methodOfDeath = MOD_ROCKET;  // reuse or add a new MOD_* constant
+
+        VectorSet( bolt->r.mins, -8, -8, -8 );
+        VectorSet( bolt->r.maxs,  8,  8,  8 );
+        VectorCopy( muzzle, bolt->r.currentOrigin );
+        VectorScale( forward, 900, bolt->s.pos.trDelta );
+        bolt->s.pos.trType = TR_LINEAR;
+        bolt->s.pos.trTime = level.time - 50;
+        SnapVector( bolt->s.pos.trDelta );
+        VectorCopy( bolt->r.currentOrigin, bolt->s.pos.trBase );
+        trap_LinkEntity( bolt );
+    }
+    ```
+  </Step>
+
+  <Step title="Hook the weapon into the dispatch">
+    In `code/game/g_weapon.c`, find `FireWeapon` and add a case:
+
+    ```c
+    case WP_MY_NEW_WEAPON:
+        FireMyNewWeapon( ent );
+        break;
+    ```
+  </Step>
+
+  <Step title="Add an item entry">
+    In `code/game/bg_misc.c`, add a `gitem_t` entry to `bg_itemlist[]` with the weapon's classname, pickup sound, world model, icon, and pickup name.
+  </Step>
+
+  <Step title="Register visual effects in cgame">
+    In `code/cgame/cg_weapons.c`, add entries for the weapon's muzzle flash, projectile model, and impact effects using the `weaponInfo_t` structure populated by `CG_RegisterWeapon`.
+  </Step>
+</Steps>
+
+## Modifying player physics
+
+Player movement runs through `Pmove` in `code/game/bg_pmove.c`. This code is compiled into both `qagame` and `cgame` so that client-side prediction matches server movement exactly.
+
+The entry point is:
+
+```c
+// code/game/bg_public.h
+void Pmove( pmove_t *pmove );
+```
+
+The `pmove_t` structure carries both input (`usercmd_t cmd`, `playerState_t *ps`) and configuration:
+
+```c
+// code/game/bg_public.h
+typedef struct {
+    playerState_t  *ps;        // in/out: player state
+    usercmd_t       cmd;       // in:     this frame's input
+    int             tracemask;
+    int             debugLevel;
+    qboolean        noFootsteps;
+    qboolean        gauntletHit;
+    int             framecount;
+    // results:
+    int             numtouch;
+    int             touchents[MAXTOUCH];
+    vec3_t          mins, maxs;   // bounding box
+    int             watertype, waterlevel;
+    float           xyspeed;
+    int             pmove_fixed;
+    int             pmove_msec;
+    void (*trace)( trace_t *, const vec3_t, const vec3_t,
+                   const vec3_t, const vec3_t, int, int );
+    int (*pointcontents)( const vec3_t, int );
+} pmove_t;
+```
+
+To change movement speed, gravity, or jump height, modify the CVars `g_speed` and `g_gravity` or change the constants inside `bg_pmove.c` directly (e.g. `pm_stopspeed`, `pm_accelerate`, `pm_friction`, `JUMP_VELOCITY`).
+
+## Adding new game types
+
+Game types are identified by the `g_gametype` CVar (a `gametype_t` integer). The enum in `bg_public.h` defines the built-in types:
+
+```c
+typedef enum {
+    GT_FFA,           // 0 - free for all
+    GT_TOURNAMENT,    // 1 - 1v1
+    GT_SINGLE_PLAYER, // 2
+    GT_TEAM,          // 3 - team deathmatch
+    GT_CTF,           // 4 - capture the flag
+    GT_1FCTF,
+    GT_OBELISK,
+    GT_HARVESTER,
+    GT_MAX_GAME_TYPE
+} gametype_t;
+```
+
+To add a game type:
+1. Add a new constant before `GT_MAX_GAME_TYPE`.
+2. Gate entity spawning in map files using the `gametype` spawn key (handled in `G_SpawnGEntityFromSpawnVars`).
+3. Implement custom scoring and end conditions in `g_main.c:CheckExitRules` and related functions.
+4. Add a team item check in `G_CheckTeamItems` if flags or other special items are needed.
+
+## Entity field customization
+
+Every server entity is a `gentity_t` defined in `code/game/g_local.h`. The first two fields must always be `entityState_t s` and `entityShared_t r` because the server reads them directly:
+
+```c
+typedef struct gentity_s {
+    entityState_t   s;       // communicated to clients in snapshots
+    entityShared_t  r;       // shared between game and server system
+    // ... game-specific fields below ...
+    struct gclient_s *client;
+    qboolean        inuse;
+    char            *classname;
+    int             spawnflags;
+    qboolean        neverFree;
+    int             flags;
+    char            *model;
+    char            *model2;
+    int             freetime;  // level.time when freed
+    int             eventTime;
+    qboolean        freeAfterEvent;
+    qboolean        unlinkAfterEvent;
+    // ... movement, targeting, health, think callbacks ...
+} gentity_t;
+```
+
+You can add fields to `gentity_t` freely, but be aware that:
+- `MAX_GENTITIES` is `1024` (10-bit entity number). Increasing it requires changing the network protocol.
+- The size of `gentity_t` is passed to `trap_LocateGameData` so the server can stride through the array; the size must be consistent.
+- Fields in `entityState_t s` are network-replicated; fields added outside `s` are server-only.
+
+<Warning>
+  Do not change the order or size of `entityState_t` or `playerState_t`. These structures are serialized over the network and their layout is fixed by the protocol.
+</Warning>

@@ -1,0 +1,135 @@
+---
+title: 'HUD and UI'
+description: 'How cg_draw.c renders the heads-up display, the font and string system, configstring-based score updates, and the separate q3_ui menu QVM.'
+---
+
+Quake III Arena splits its user interface into two layers. The **HUD** (status bar, crosshair, scores, powerup timers) is drawn by the cgame QVM each frame inside `cg_draw.c`. The **menu system** (main menu, server browser, options screens) lives in a separate QVM, `q3_ui`, that is loaded and unloaded independently of the cgame module.
+
+## HUD drawing pipeline
+
+Every frame `CG_DrawActiveFrame` calls `CG_DrawActive`, which in turn calls the 2-D HUD functions after the 3-D scene has been submitted to the renderer. The coordinate system is always normalized to a 640×480 virtual screen; `CG_AdjustFrom640` scales all pixel values to the actual display resolution before passing them to `trap_R_DrawStretchPic`.
+
+```c
+void CG_AdjustFrom640( float *x, float *y, float *w, float *h );
+void CG_FillRect( float x, float y, float width, float height, const float *color );
+void CG_DrawPic( float x, float y, float width, float height, qhandle_t hShader );
+```
+
+### Status bar elements
+
+`CG_DrawStatusBar` (non-MissionPack build) draws the lower portion of the screen.
+
+<CardGroup cols={2}>
+  <Card title="Health">
+    Read from `ps->stats[STAT_HEALTH]`. Drawn with `CG_DrawField` using the number shaders registered in `cgMedia_t.numberShaders`. Color shifts from white → green → flashing red as health decreases.
+  </Card>
+  <Card title="Armor">
+    Read from `ps->stats[STAT_ARMOR]`. Drawn alongside a rotating 3-D armor model when `cg_draw3dIcons` is enabled.
+  </Card>
+  <Card title="Ammo">
+    Read from `ps->ammo[cent->currentState.weapon]`. Color indicates firing state: green = ready, dark grey = firing/reloading.
+  </Card>
+  <Card title="Player head">
+    `CG_DrawStatusBarHead` renders the local player's head model in a small viewport using `CG_Draw3DModel`, animating the yaw to look toward the last damage source.
+  </Card>
+</CardGroup>
+
+### Crosshair
+
+```c
+static void CG_DrawCrosshair( void );
+```
+
+The crosshair style is chosen by `cg_drawCrosshair` (0–9), mapped to `cgs.media.crosshairShader[ca % NUM_CROSSHAIRS]`. When `cg_crosshairHealth` is non-zero the crosshair is colored by `CG_ColorForHealth`. The size pulses briefly when the player picks up an item.
+
+### Scoreboard
+
+The scoreboard is toggled by `CG_SCOREBOARD` events and drawn by `CG_DrawOldScoreboard`. The score data comes from `cg.scores[]` which is populated via server commands, not snapshot entities.
+
+### Team overlay
+
+`CG_DrawTeamOverlay` iterates `sortedTeamPlayers[]` and, for each visible teammate, draws name, location, health, armor, current weapon icon, and active powerup icons. Location names are read from configstrings starting at `CS_LOCATIONS`.
+
+## String and font system
+
+Two font rendering paths exist depending on the build.
+
+<Tabs>
+  <Tab title="Standard build (bitmap font)">
+    `CG_DrawStringExt` renders characters by indexing into the `charsetShader` bitmap atlas. Each character is `CHAR_WIDTH` × `CHAR_HEIGHT` pixels (32 × 48 in the standard atlas).
+
+    ```c
+    void CG_DrawStringExt( int x, int y, const char *string, const float *setColor,
+                           qboolean forceColor, qboolean shadow,
+                           int charWidth, int charHeight, int maxChars );
+    void CG_DrawBigString( int x, int y, const char *s, float alpha );
+    void CG_DrawSmallString( int x, int y, const char *s, float alpha );
+    ```
+
+    `CG_DrawStrlen` returns the printable character count, skipping Quake color-code escape sequences (`^N` where N is 0–9).
+  </Tab>
+  <Tab title="MissionPack build (TTF glyphs)">
+    The MissionPack build uses `trap_R_RegisterFont` to load a proportional font and exposes three size tiers controlled by the CVars `ui_smallFont` and `ui_bigFont`.
+
+    ```c
+    void CG_Text_Paint( float x, float y, float scale, vec4_t color,
+                        const char *text, float adjust, int limit, int style );
+    int  CG_Text_Width( const char *text, float scale, int limit );
+    int  CG_Text_Height( const char *text, float scale, int limit );
+    ```
+
+    Each glyph is a `glyphInfo_t` entry in a `fontInfo_t` registered with the renderer. Text styles include `ITEM_TEXTSTYLE_SHADOWED` and `ITEM_TEXTSTYLE_SHADOWEDMORE`.
+  </Tab>
+</Tabs>
+
+## Configstring-based updates
+
+Game state that doesn't belong in snapshots (team scores, flag status, vote strings, level start time) is transmitted as **configstrings**. The cgame module reads them at startup via `trap_GetGameState` and monitors changes each frame through `CG_ExecuteNewServerCommands`.
+
+```c
+const char *CG_ConfigString( int index );
+void CG_ParseServerinfo( void );   // CS_SERVERINFO -> gametype, fraglimit, etc.
+void CG_SetConfigValues( void );   // CS_SCORES1/2, CS_FLAGSTATUS, etc.
+```
+
+Key configstring indices:
+
+| Index | Content |
+|---|---|
+| `CS_SERVERINFO` | Serverinfo key/value pairs (`gametype`, `fraglimit`, …) |
+| `CS_SCORES1/2` | Current team or top-player scores |
+| `CS_PLAYERS + i` | Player userinfo for client `i` |
+| `CS_LOCATIONS + i` | Location name strings for team overlay |
+| `CS_MUSIC` | Background music track paths |
+
+## Menu system (q3_ui)
+
+The menu system is a **separate QVM** (`q3_ui.qvm` or `ui.qvm` in the MissionPack). The engine loads it independently of cgame. The interface uses the same `vmMain` dispatch pattern.
+
+```c
+// Exported from the UI QVM
+void UI_Init( void );
+void UI_DrawConnectScreen( qboolean overlay );
+void UI_KeyEvent( int key, qboolean down );
+void UI_MouseEvent( int dx, int dy );
+```
+
+The UI module registers a key catcher (`KEYCATCH_UI`) through `trap_Key_SetCatcher` to capture all keyboard and mouse input while a menu is open. When the in-game HUD needs to display a menu (team selection, scoreboard in MissionPack), cgame sets the catcher to `KEYCATCH_CGAME` and handles events through `CG_KeyEvent`.
+
+<Note>
+In the MissionPack build the HUD itself is data-driven through `ui/hud.txt` (controlled by `cg_hudFiles`). The file is parsed at init time by `CG_LoadMenus` and drives `CG_OwnerDraw` callbacks for each HUD element.
+</Note>
+
+## Useful HUD CVars
+
+| CVar | Default | Effect |
+|---|---|---|
+| `cg_draw2D` | `1` | Enable/disable the entire 2-D HUD layer |
+| `cg_drawStatus` | `1` | Show/hide the status bar |
+| `cg_drawCrosshair` | `4` | Crosshair style (0 = off, 1–10 = style) |
+| `cg_crosshairSize` | `24` | Crosshair size in virtual pixels |
+| `cg_crosshairHealth` | `1` | Tint crosshair by health level |
+| `cg_drawFPS` | `0` | Show frame-rate counter |
+| `cg_drawTimer` | `0` | Show match timer |
+| `cg_lagometer` | `1` | Show lag-o-meter graph |
+| `cg_drawTeamOverlay` | `0` | Show team status overlay |

@@ -1,0 +1,128 @@
+---
+title: 'Server networking'
+description: 'Server-side client management, the SV_Frame loop, client state machine, configstring broadcasting, and the reliable command queue.'
+---
+
+The server manages all connected clients from `server/sv_client.c` and drives the main loop from `server/sv_main.c`.
+
+## Server main loop
+
+`SV_Frame` is called once per server tick (controlled by `sv_fps`, default 20 fps). It:
+
+1. Processes incoming network packets.
+2. Runs the game QVM for one frame.
+3. Sends snapshots to all active clients.
+
+```c
+void SV_Frame( int msec );  // sv_main.c
+```
+
+The server time advances by `msec` each call. Game logic runs at the rate defined by `sv_fps`; clients may render at higher rates by interpolating between snapshots.
+
+## Server-side data structures
+
+```c
+serverStatic_t  svs;   // persistent across map changes
+server_t        sv;    // cleared on each map change
+vm_t           *gvm;   // game QVM
+```
+
+Each connected client is tracked by a `client_t` in `svs.clients[]`.
+
+## Client state machine
+
+A client slot progresses through these states (`clientState_t`):
+
+| State | Description |
+|---|---|
+| `CS_FREE` | Slot is available |
+| `CS_ZOMBIE` | Recently disconnected; slot held briefly to absorb late packets |
+| `CS_CONNECTED` | Challenge passed; downloading gamestate |
+| `CS_PRIMED` | Gamestate received; waiting for first user command |
+| `CS_ACTIVE` | Fully in game; receiving snapshots |
+
+`CS_ZOMBIE` timeout is controlled by `sv_zombietime` (default 2 seconds).
+
+## Connection handshake
+
+The connection sequence is challenge-based to prevent IP spoofing.
+
+<Steps>
+  <Step title="getchallenge">
+    The client sends an OOB `getchallenge` packet. The server allocates a `challenge_t` entry in `svs.challenges[]` and replies with `challengeResponse <number>`.
+
+    ```c
+    void SV_GetChallenge( netadr_t from );  // sv_client.c
+    ```
+  </Step>
+  <Step title="connect">
+    The client sends an OOB `connect` packet containing the challenge number and userinfo string. `SV_DirectConnect` validates the challenge, checks the client slot count, and promotes the slot to `CS_CONNECTED`.
+
+    ```c
+    void SV_DirectConnect( netadr_t from );  // sv_client.c
+    ```
+  </Step>
+  <Step title="gamestate">
+    The server sends a `svc_gamestate` message containing all configstrings and entity baselines. The client acknowledges with a `new` command, after which the server moves it to `CS_PRIMED`.
+  </Step>
+  <Step title="first user command">
+    When the server receives the client's first `clc_move` packet it transitions the client to `CS_ACTIVE` and begins sending regular snapshots.
+  </Step>
+</Steps>
+
+## Configstring system
+
+Configstrings are short key/value or plain strings that broadcast persistent game state to all clients. They are indexed from 0 to `MAX_CONFIGSTRINGS - 1`.
+
+```c
+void SV_SetConfigstring( int index, const char *val );  // sv_init.c
+void SV_GetConfigstring( int index, char *buffer, int bufferSize );
+```
+
+When a configstring changes, the server adds a `svc_configstring` server command to the reliable queue of every active client so the update arrives in order.
+
+Important configstring ranges:
+
+| Range | Content |
+|---|---|
+| `CS_SERVERINFO` | Serverinfo key/value block |
+| `CS_SYSTEMINFO` | System info (pure, protocol) |
+| `CS_PLAYERS + i` | Per-client userinfo |
+| `CS_MODELS + i` | Model precache list |
+| `CS_SOUNDS + i` | Sound precache list |
+| `CS_LOCATIONS + i` | Map location names |
+
+## Reliable command queue
+
+Each client has a reliable command queue implemented as a circular buffer:
+
+```c
+client_t {
+    int  reliableSequence;    // last sequence queued
+    int  reliableAcknowledge; // last sequence the client acknowledged
+    int  reliableSent;        // last sequence sent (may lag reliableSequence)
+    char reliableCommands[MAX_RELIABLE_COMMANDS][MAX_STRING_CHARS];
+};
+```
+
+`SV_UpdateServerCommandsToClient` resends all unacknowledged commands on each outgoing packet until `client->reliableAcknowledge == client->reliableSequence`.
+
+```c
+void SV_UpdateServerCommandsToClient( client_t *client, msg_t *msg );
+```
+
+## Important server CVars
+
+| CVar | Default | Description |
+|---|---|---|
+| `sv_maxclients` | `8` | Maximum simultaneous clients |
+| `sv_fps` | `20` | Server tick rate |
+| `sv_timeout` | `200` | Seconds before dropping an unresponsive client |
+| `sv_zombietime` | `2` | Seconds a `CS_ZOMBIE` slot is held |
+| `sv_pure` | `1` | Enforce pure server (pk3 checksums) |
+| `sv_maxRate` | `0` | Cap client bandwidth (bytes/sec); 0 = no cap |
+| `sv_hostname` | `noname` | Server name shown in browser |
+
+<Warning>
+Reducing `sv_fps` below 10 can cause significant gameplay degradation. Bots and physics run at the server tick rate.
+</Warning>

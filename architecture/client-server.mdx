@@ -1,0 +1,237 @@
+---
+title: "Client-Server Architecture"
+description: "How the Quake III Arena engine splits simulation between an authoritative server and predicting clients, including snapshot delivery, delta compression, and the connection sequence."
+---
+
+Quake III uses a classic client-server model: one **server** runs the authoritative simulation; one or more **clients** connect to it, send input, and receive periodic snapshots of world state. Clients run local prediction to hide network latency.
+
+---
+
+## The Authoritative Server
+
+The server owns all game state. Every player action reaches the server as a `usercmd_t` (user command), the server applies it to the simulation, and the results are broadcast back to clients as snapshots.
+
+Game logic runs inside `qagame.qvm`. The server calls into it each frame:
+
+```c
+// server/sv_main.c: SV_Frame (simplified)
+void SV_Frame( int msec ) {
+    // advance server time
+    svs.time += msec;
+
+    // run the game module for one frame
+    VM_Call( gvm, GAME_RUN_FRAME, svs.time );
+
+    // build and send snapshots to each client
+    SV_SendClientMessages();
+}
+```
+
+### What the server trusts
+
+The server validates all client input. It accepts `usercmd_t` packets (`clc_move`) but re-runs movement through the same `PmoveSingle` code used by the client's prediction. The game module (`qagame.qvm`) applies damage, checks collisions, and awards scores.
+
+---
+
+## Clients and Local Prediction
+
+To avoid waiting a full round-trip for every input, the client predicts its own movement locally using `bg_pmove.c` — the exact same movement code that runs on the server. When a new snapshot arrives, the client reconciles its prediction against the authoritative server state.
+
+### How prediction works
+
+1. The client records each `usercmd_t` in a circular buffer (`cl.cmds[CMD_BACKUP]`).
+2. `CG_PredictPlayerState` in `cgame.qvm` re-runs all commands newer than the last acknowledged snapshot through `PmoveSingle`.
+3. If the predicted position diverges from the snapshot, the client smoothly corrects.
+
+```c
+// cg_public.h
+#define CMD_BACKUP  64   // circular buffer of saved usercmds
+#define CMD_MASK    (CMD_BACKUP - 1)
+```
+
+<Note>
+Prediction only applies to the local player. Other entities are interpolated between the two most recent snapshots.
+</Note>
+
+---
+
+## Snapshots
+
+A snapshot is a point-in-time view of the server, delivered from server to client as an `svc_snapshot` message.
+
+### `snapshot_t` structure
+
+```c
+// cg_public.h
+typedef struct {
+    int           snapFlags;    // SNAPFLAG_RATE_DELAYED, etc.
+    int           ping;
+    int           serverTime;   // server milliseconds this snapshot covers
+    byte          areamask[MAX_MAP_AREA_BYTES];  // PVS area bits
+    playerState_t ps;           // complete player state
+    int           numEntities;  // entities in this snapshot
+    entityState_t entities[MAX_ENTITIES_IN_SNAPSHOT];  // max 256
+    int           numServerCommands;
+    int           serverCommandSequence;
+} snapshot_t;
+```
+
+### Delta compression
+
+Snapshots are delta-compressed against an earlier snapshot the server knows the client has received. Only changed fields are transmitted. The engine maintains a ring buffer of the last 32 snapshots (`PACKET_BACKUP`) for this purpose:
+
+```c
+// qcommon.h
+#define PACKET_BACKUP   32   // old messages kept for delta compression
+#define PACKET_MASK     (PACKET_BACKUP - 1)
+```
+
+The actual field-level delta encoding uses `MSG_WriteDeltaEntity` and `MSG_WriteDeltaPlayerstate`, which walk the struct fields and transmit only the ones that changed:
+
+```c
+// qcommon.h
+void MSG_WriteDeltaEntity( msg_t *msg,
+                           struct entityState_s *from,
+                           struct entityState_s *to,
+                           qboolean force );
+void MSG_WriteDeltaPlayerstate( msg_t *msg,
+                                struct playerState_s *from,
+                                struct playerState_s *to );
+```
+
+### PVS culling
+
+Before writing entities into a snapshot, the server checks each entity's position against the client's Potentially Visible Set (PVS). Entities outside the PVS are excluded. Portal entities (`SVF_PORTAL`) cause a second PVS origin to be merged in, ensuring entities visible through portals are included.
+
+The per-client snapshot build happens in `SV_BuildClientSnapshot` (`server/sv_snapshot.c`).
+
+---
+
+## The Connection Sequence
+
+A client connecting to a server goes through several state transitions:
+
+<Steps>
+  <Step title="Challenge (out-of-band)">
+    The client sends an out-of-band `getchallenge` UDP packet to the server. The server replies with a random challenge number.
+
+    ```
+    client → server: "getchallenge"
+    server → client: "challengeResponse <num>"
+    ```
+  </Step>
+  <Step title="Connect">
+    The client sends a `connect` packet containing its userinfo string and the challenge number from the previous step. The server validates the challenge and calls `GAME_CLIENT_CONNECT` inside `qagame.qvm`.
+
+    ```
+    client → server: "connect <userinfo> <challenge>"
+    server → client: "connectResponse"
+    ```
+
+    If the game module returns a non-NULL string from `GAME_CLIENT_CONNECT`, the connection is denied with that string as the reason.
+  </Step>
+  <Step title="Gamestate delivery">
+    The server sends an `svc_gamestate` message. This reliable message contains:
+    - All current configstrings (`svc_configstring`).
+    - Entity baselines (`svc_baseline`) — initial entity states used as delta-compression origins for the first snapshot.
+
+    ```c
+    // qcommon.h protocol ops
+    svc_gamestate,     // umbrella for the following:
+    svc_configstring,  // [short index] [string value]
+    svc_baseline,      // entity baseline state
+    ```
+  </Step>
+  <Step title="Priming">
+    After receiving the gamestate, the client loads the map, loads `cgame.qvm` (`CG_INIT`), and begins processing snapshots. The server calls `GAME_CLIENT_BEGIN` to let the game module spawn the player entity.
+  </Step>
+  <Step title="Normal play">
+    The client sends `clc_move` packets each frame; the server sends `svc_snapshot` packets at the server's tickrate.
+
+    ```c
+    // Client → Server (each frame)
+    clc_move    // up to 32 usercmd_t commands, delta-compressed
+
+    // Server → Client (each frame)
+    svc_snapshot  // delta-compressed world state
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Configstrings
+
+Configstrings are key-value string slots that communicate server-wide configuration to all clients reliably. They carry map name, player names, team scores, item names, and any other data that all clients must agree on.
+
+```c
+// g_public.h: game sets configstrings through this trap
+G_SET_CONFIGSTRING,  // ( int num, const char *string )
+G_GET_CONFIGSTRING,  // ( int num, char *buffer, int bufferSize )
+```
+
+Whenever the server calls `G_SET_CONFIGSTRING`, the change is queued and sent reliably to all connected clients via `svc_configstring`. All configstrings are re-sent inside the `svc_gamestate` message when a new client connects.
+
+---
+
+## Dedicated vs. Listen Servers
+
+| Feature | Dedicated | Listen |
+|---|---|---|
+| `com_dedicated` cvar | `1` | `0` |
+| `CL_Frame` called | No (`#ifndef DEDICATED`) | Yes |
+| Renderer loaded | No | Yes |
+| Sound loaded | No | Yes |
+| Run-from directory | Any | Must have game data |
+| Platform stub used | `code/null/` | Full client code |
+
+On a **listen server** both `SV_Frame` and `CL_Frame` execute in the same `Com_Frame` call. The local client communicates with the local server through the loopback network socket (`NA_LOOPBACK`), so it still goes through the full snapshot/delta pipeline — there is no special fast-path for local clients in this codebase.
+
+```c
+// common.c: Com_Frame excerpt
+SV_Frame( msec );          // always runs
+
+if ( !com_dedicated->integer ) {
+    Com_EventLoop();       // pick up loopback packets
+    CL_Frame( msec );      // only on listen/client
+}
+```
+
+---
+
+## Reliable Commands
+
+Not all server → client communication goes through snapshots. Text commands (score events, announcements, print messages) are sent as **reliable** `svc_serverCommand` messages. The client queues them and executes them in order when the snapshot they were associated with becomes current:
+
+```c
+// qcommon.h
+#define MAX_RELIABLE_COMMANDS  64  // max buffered for retransmit
+```
+
+The game module sends them via the `G_SEND_SERVER_COMMAND` trap:
+
+```c
+// g_public.h
+G_SEND_SERVER_COMMAND,
+// ( int clientNum, const char *fmt, ... )
+// clientNum == -1  →  send to ALL clients
+```
+
+---
+
+## Protocol Version
+
+The network protocol is versioned. The current version in this source release is:
+
+```c
+// qcommon.h
+#define PROTOCOL_VERSION  68
+// 1.31 shipped as 67
+```
+
+The engine also maintains a compatibility list for demo playback:
+
+```c
+// common.c
+int demo_protocols[] = { 66, 67, 68, 0 };
+```

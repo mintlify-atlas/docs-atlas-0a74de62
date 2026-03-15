@@ -1,0 +1,142 @@
+---
+title: Entity System
+description: How Quake III Arena allocates, runs, and frees server-side entities, and the role of config strings in communicating entity state to clients.
+---
+
+Every object in a running game — players, items, projectiles, triggers, doors, and more — is a `gentity_t`. The game module maintains a flat array of these:
+
+```c
+gentity_t g_entities[MAX_GENTITIES];  // MAX_GENTITIES = 1024
+gclient_t g_clients[MAX_CLIENTS];     // first MAX_CLIENTS slots are players
+```
+
+## Allocation and freeing
+
+### `G_Spawn`
+
+```c
+gentity_t *G_Spawn( void );
+```
+
+`G_Spawn` (in `g_utils.c`) searches the entity array for a free slot. It skips the first `MAX_CLIENTS` slots, which are reserved exclusively for player entities. If no free slot is found and the count is below `MAX_GENTITIES`, it expands `level.num_entities`. The selected slot is zeroed with `G_InitGentity()`.
+
+<Warning>
+The server does not support shrinking the entity count. Once `level.num_entities` grows to accommodate a burst of entities it stays at that watermark for the duration of the map.
+</Warning>
+
+### `G_FreeEntity`
+
+```c
+void G_FreeEntity( gentity_t *e );
+```
+
+Sets `e->inuse = qfalse`, calls `trap_UnlinkEntity` to remove it from the world link, and records `e->freetime = level.time`. The slot is not immediately available for re-use: `G_Spawn` skips slots whose `freetime` is within `FRAMETIME` (100 ms) of the current time to prevent the same slot being recycled within the same server frame.
+
+Entities with `neverFree = qtrue` (body queue corpses) are only unlinked, never zeroed.
+
+## Think, touch, use, pain, die
+
+Every `gentity_t` has five optional callback pointers:
+
+```c
+void (*think)(gentity_t *self);
+void (*touch)(gentity_t *self, gentity_t *other, trace_t *trace);
+void (*use)(gentity_t *self, gentity_t *other, gentity_t *activator);
+void (*pain)(gentity_t *self, gentity_t *attacker, int damage);
+void (*die)(gentity_t *self, gentity_t *inflictor,
+            gentity_t *attacker, int damage, int mod);
+```
+
+`G_RunThink` (called from `G_RunFrame`) fires `think` when `level.time >= ent->nextthink`. The entity sets `nextthink` before returning to schedule the next call. A `nextthink` of `0` means the entity will never think again.
+
+## `gentity_t` field reference
+
+| Field | Type | Purpose |
+|---|---|---|
+| `s` | `entityState_t` | Network-transmitted state (eType, origin, angles, weapon, events) |
+| `r` | `entityShared_t` | Server-visible data (bounding box, SVF_* flags, link state) |
+| `client` | `gclient_t *` | Non-NULL for player entities |
+| `inuse` | `qboolean` | Slot is live |
+| `classname` | `char *` | Entity class string from BSP (`"item_armor_body"` etc.) |
+| `spawnflags` | `int` | Editor-set flags |
+| `flags` | `int` | Runtime FL_* flags |
+| `health` | `int` | Current health |
+| `takedamage` | `qboolean` | Receives `G_Damage` calls |
+| `damage` | `int` | Contact/trigger damage amount |
+| `splashDamage` | `int` | Explosion splash damage |
+| `splashRadius` | `int` | Explosion radius |
+| `methodOfDeath` | `int` | MOD_* value for obituary messages |
+| `nextthink` | `int` | `level.time` when `think` fires |
+| `model` | `char *` | Primary model path |
+| `target` | `char *` | Targeting key |
+| `targetname` | `char *` | Identifier for targeting |
+| `speed` | `float` | Mover speed |
+| `pos1`, `pos2` | `vec3_t` | Mover endpoints |
+| `moverState` | `moverState_t` | MOVER_POS1/2/1TO2/2TO1 |
+| `item` | `gitem_t *` | For pickup items |
+
+## Entity types
+
+### Items
+
+Weapons, ammo, armor, health, powerups, and holdable items. Spawned by `G_SpawnItem()`. Their `think` is `RespawnItem` — after being picked up they hide for a respawn delay then reappear. `Touch_Item` handles player contact.
+
+### Triggers
+
+Invisible volumes that fire when a player enters them. Common trigger classes: `trigger_teleport`, `trigger_push`, `trigger_hurt`. Their `touch` callback fires the effect and activates targets via `G_UseTargets()`.
+
+### Movers
+
+Doors (`func_door`), platforms (`func_plat`), and buttons (`func_button`). State machine with `moverState_t` values. Physics run through `G_RunMover()`, which evaluates the current trajectory and calls `reached` when the endpoint is hit.
+
+### Player entities
+
+Slots 0 through `MAX_CLIENTS - 1`. The entity's `client` pointer is always valid. `G_RunClient()` → `ClientThink()` → `ClientThink_real()` processes the `usercmd_t` for each player each frame.
+
+## Config strings
+
+Config strings are the mechanism for broadcasting string data from the server to all connected clients. They persist across snapshots and are sent in full on client connect.
+
+```c
+void trap_SetConfigstring( int num, const char *string );
+void trap_GetConfigstring( int num, char *buffer, int bufferSize );
+```
+
+Relevant config string indices from `bg_public.h`:
+
+| Index | Constant | Content |
+|---|---|---|
+| `0` | `CS_SERVERINFO` | Server info key/value string |
+| `2` | `CS_MUSIC` | Background music track |
+| `3` | `CS_MESSAGE` | Map message (from worldspawn) |
+| `6` | `CS_SCORES1` | Red team / player 1 score |
+| `7` | `CS_SCORES2` | Blue team / player 2 score |
+| `22` | `CS_INTERMISSION` | "1" when intermission begins |
+| `23` | `CS_FLAGSTATUS` | Flag carrier status string (CTF) |
+| `27` | `CS_ITEMS` | Bitmask string of present items |
+| `32+` | `CS_MODELS` | Registered model paths |
+| `32+MAX_MODELS+` | `CS_SOUNDS` | Registered sound paths |
+| `CS_SOUNDS+MAX_SOUNDS+` | `CS_PLAYERS` | Player info strings |
+
+The game sets model and sound config strings via `G_ModelIndex()` and `G_SoundIndex()`, which allocate a slot and call `trap_SetConfigstring`. Clients read these at snapshot time to load assets.
+
+## Temporary entities
+
+```c
+gentity_t *G_TempEntity( vec3_t origin, int event );
+```
+
+Temp entities live for exactly one frame (`freeAfterEvent = qtrue`). They carry an `entity_event_t` in `s.event` and are used for one-shot effects: bullet impacts, missile explosions, railgun trails, and score plums. The client game renders them via the cgame event system.
+
+## `svFlags` reference
+
+The `r.svFlags` field controls how the server network-culls entities:
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `SVF_NOCLIENT` | `0x01` | Never sent to any client |
+| `SVF_BOT` | `0x08` | Entity is a bot |
+| `SVF_BROADCAST` | `0x20` | Force-send to all clients |
+| `SVF_PORTAL` | `0x40` | Merge second PVS at `origin2` |
+| `SVF_SINGLECLIENT` | `0x100` | Send only to `singleClient` |
+| `SVF_CAPSULE` | `0x400` | Use capsule collision |

@@ -1,0 +1,119 @@
+---
+title: 'Console commands'
+description: 'The command system: Cmd_AddCommand, Cbuf_AddText, argument accessors, key commands, and a reference list of important built-in commands.'
+---
+
+The **command system** (`qcommon/cmd.c`) processes text commands typed at the developer console, bound to keys, or executed from config files. It is separate from the CVar system but tightly related: when an unknown token is entered at the console, the engine checks whether it is a CVar name before reporting an error.
+
+## Command registration
+
+```c
+void Cmd_AddCommand( const char *cmd_name, xcommand_t function );
+void Cmd_RemoveCommand( const char *cmd_name );
+```
+
+Engine subsystems and QVM modules register commands during initialization. `cmd_name` is stored by reference — it must not be in temporary memory. If `function` is `NULL`, the command is forwarded to the server as a `clc_clientCommand` string instead of being executed locally.
+
+```c
+// Example: cgame registering a console command
+trap_AddCommand( "kill" );
+// When the player types "kill", the client sends it to the server
+```
+
+## Command buffer
+
+Commands are queued in a 16 KB text buffer before execution.
+
+```c
+void Cbuf_Init( void );              // allocate the buffer
+void Cbuf_AddText( const char *text );  // append text (no trailing \n required)
+void Cbuf_Execute( void );           // execute all queued commands
+```
+
+`Cbuf_Execute` is called once per frame from `Com_Frame`. It splits the buffer on `\n` and `;` delimiters and calls `Cmd_ExecuteString` for each line. The `wait` command defers execution to the next frame (used in bind macros).
+
+```c
+void Cbuf_ExecuteText( int exec_when, const char *text );
+```
+
+`exec_when` is one of `EXEC_NOW` (immediate), `EXEC_INSERT` (front of buffer), or `EXEC_APPEND` (back of buffer).
+
+## Argument accessors
+
+Inside a command handler, the tokenized arguments are read with:
+
+```c
+int   Cmd_Argc( void );              // total argument count (includes argv[0])
+char *Cmd_Argv( int arg );           // individual argument string
+char *Cmd_Args( void );              // all arguments after argv[0], as one string
+char *Cmd_ArgsFrom( int arg );       // arguments from `arg` onward
+void  Cmd_ArgvBuffer( int arg, char *buffer, int bufferLength );
+```
+
+Arguments are never `NULL`; `Cmd_Argv(n)` returns an empty string when `n >= Cmd_Argc()`.
+
+## Key commands
+
+Key bindings are processed before the console command system. A binding maps a key to a text string. When the key is pressed, the string is prepended with `+` and appended to the command buffer. When released, the string is prefixed with `-`:
+
+```bash
+bind mouse1 "+attack"
+# Generates:
+#   +attack  (on press)
+#   -attack  (on release)
+```
+
+Positive (`+`) commands register an action that lasts until the corresponding negative (`-`) command fires. The pair is registered with `Cmd_AddCommand`.
+
+## Server commands (`sv_ccmds.c`)
+
+The server registers its own commands during `SV_Init`. These are only available when a server is running:
+
+| Command | Description |
+|---|---|
+| `map <name>` | Load a map and start a server |
+| `devmap <name>` | Load a map with cheats enabled |
+| `killserver` | Shut down the current server |
+| `status` | Print connected clients and their info |
+| `clientkick <id>` | Kick a client by slot number |
+| `kick <name>` | Kick a client by name |
+| `heartbeat` | Send a heartbeat to the master server |
+| `sectorlist` | Dump world sector (entity) stats |
+
+## Important built-in commands
+
+### Config and filesystem
+
+| Command | Description |
+|---|---|
+| `exec <file>` | Execute a config file |
+| `vstr <cvar>` | Execute the string value of a CVar |
+| `set <cvar> <value>` | Set a CVar |
+| `seta <cvar> <value>` | Set and archive a CVar |
+| `toggle <cvar>` | Toggle a CVar between 0 and 1 |
+| `reset <cvar>` | Reset a CVar to its default value |
+| `writeconfig <file>` | Write all archived CVars to a file |
+
+### System
+
+| Command | Description |
+|---|---|
+| `quit` | Exit the game |
+| `vid_restart` | Restart the renderer |
+| `snd_restart` | Restart the sound system |
+| `disconnect` | Disconnect from the current server |
+| `reconnect` | Reconnect to the last server |
+| `connect <addr>` | Connect to a server |
+
+### Debug
+
+| Command | Description |
+|---|---|
+| `cmdlist` | List all registered commands |
+| `cvarlist` | List all registered CVars |
+| `cvar_restart` | Reset all CVars to defaults |
+| `condump <file>` | Dump console history to a file |
+
+<Note>
+CVar names and command names share the same namespace. The engine checks commands first, then CVars. This means a CVar named the same as a command will shadow the command.
+</Note>

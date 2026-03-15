@@ -1,0 +1,364 @@
+---
+title: "Engine Modules"
+description: "All major engine subsystems, their responsibilities, and their public C interfaces."
+---
+
+The engine is a collection of cooperating C modules. Each module exposes a narrow public interface and communicates with the rest of the engine through direct function calls or the QVM trap mechanism. This page describes every major module and shows the actual function signatures from the public headers.
+
+<CardGroup cols={2}>
+  <Card title="qcommon" icon="gear">
+    Shared infrastructure available to both client and server: command buffer, cvars, filesystem, hunk/zone memory, networking, and the QVM loader.
+  </Card>
+  <Card title="renderer" icon="display">
+    OpenGL rendering pipeline. Loaded as a separate DLL/SO at runtime. Exposes `refexport_t` and consumes `refimport_t`.
+  </Card>
+  <Card title="client" icon="computer">
+    Window management, input, sound, cinematic playback, UI glue, and the connection state machine.
+  </Card>
+  <Card title="server" icon="server">
+    Authoritative game simulation host. Manages client connections, runs the game module, and generates delta-compressed snapshots.
+  </Card>
+  <Card title="game (QVM)" icon="code">
+    Server-side game logic (weapons, items, scoring). Runs inside `qagame.qvm`.
+  </Card>
+  <Card title="cgame (QVM)" icon="gamepad">
+    Client-side prediction, entity interpolation, HUD rendering. Runs inside `cgame.qvm`.
+  </Card>
+  <Card title="ui (QVM)" icon="window">
+    Main menu and in-game UI. Runs inside `ui.qvm`.
+  </Card>
+  <Card title="botlib" icon="robot">
+    AAS (Area Awareness System) pathfinding and bot AI. Used by the game module via engine traps.
+  </Card>
+</CardGroup>
+
+---
+
+## qcommon
+
+`code/qcommon/qcommon.h` declares the shared API used everywhere in the engine.
+
+### Virtual Machine
+
+```c
+// qcommon.h
+typedef enum {
+    VMI_NATIVE,      // load as native DLL
+    VMI_BYTECODE,    // interpreted QVM
+    VMI_COMPILED     // x86 JIT-compiled QVM
+} vmInterpret_t;
+
+void    VM_Init( void );
+vm_t   *VM_Create( const char *module,
+                   int (*systemCalls)(int *),
+                   vmInterpret_t interpret );
+void    VM_Free( vm_t *vm );
+vm_t   *VM_Restart( vm_t *vm );
+int     QDECL VM_Call( vm_t *vm, int callNum, ... );
+void   *VM_ArgPtr( int intValue );
+void   *VM_ExplicitArgPtr( vm_t *vm, int intValue );
+```
+
+### Networking
+
+```c
+// qcommon.h
+void    NET_Init( void );
+void    NET_SendPacket( netsrc_t sock, int length,
+                        const void *data, netadr_t to );
+void    Netchan_Init( int qport );
+void    Netchan_Transmit( netchan_t *chan, int length,
+                          const byte *data );
+qboolean Netchan_Process( netchan_t *chan, msg_t *msg );
+```
+
+### Message Serialisation
+
+```c
+// qcommon.h — bit-level and structured message read/write
+void  MSG_Init( msg_t *buf, byte *data, int length );
+void  MSG_WriteBits( msg_t *msg, int value, int bits );
+int   MSG_ReadBits( msg_t *msg, int bits );
+
+// Delta-compressed structures
+void  MSG_WriteDeltaEntity( msg_t *msg,
+          struct entityState_s *from,
+          struct entityState_s *to, qboolean force );
+void  MSG_ReadDeltaEntity( msg_t *msg, entityState_t *from,
+          entityState_t *to, int number );
+void  MSG_WriteDeltaPlayerstate( msg_t *msg,
+          struct playerState_s *from,
+          struct playerState_s *to );
+void  MSG_ReadDeltaPlayerstate( msg_t *msg,
+          struct playerState_s *from,
+          struct playerState_s *to );
+```
+
+### Common Init / Frame
+
+```c
+// common.c
+void Com_Init( char *commandLine );
+void Com_Frame( void );
+void Com_Shutdown( void );
+void QDECL Com_Printf( const char *fmt, ... );
+void QDECL Com_Error( int code, const char *fmt, ... );
+```
+
+---
+
+## Renderer
+
+The renderer is loaded at runtime as a dynamic library. The engine calls `GetRefAPI` to obtain a `refexport_t` struct full of function pointers, and passes a `refimport_t` struct back so the renderer can call engine services.
+
+### `refexport_t` — functions the renderer exports
+
+```c
+// tr_public.h
+typedef struct {
+    void    (*Shutdown)( qboolean destroyWindow );
+
+    void    (*BeginRegistration)( glconfig_t *config );
+    qhandle_t (*RegisterModel)( const char *name );
+    qhandle_t (*RegisterSkin)( const char *name );
+    qhandle_t (*RegisterShader)( const char *name );
+    void    (*LoadWorld)( const char *name );
+    void    (*EndRegistration)( void );
+
+    void    (*ClearScene)( void );
+    void    (*AddRefEntityToScene)( const refEntity_t *re );
+    void    (*AddPolyToScene)( qhandle_t hShader, int numVerts,
+                               const polyVert_t *verts, int num );
+    void    (*AddLightToScene)( const vec3_t org, float intensity,
+                                float r, float g, float b );
+    void    (*RenderScene)( const refdef_t *fd );
+
+    void    (*SetColor)( const float *rgba );
+    void    (*DrawStretchPic)( float x, float y, float w, float h,
+                               float s1, float t1, float s2, float t2,
+                               qhandle_t hShader );
+
+    void    (*BeginFrame)( stereoFrame_t stereoFrame );
+    void    (*EndFrame)( int *frontEndMsec, int *backEndMsec );
+
+    int     (*LerpTag)( orientation_t *tag, qhandle_t model,
+                        int startFrame, int endFrame,
+                        float frac, const char *tagName );
+    void    (*ModelBounds)( qhandle_t model,
+                            vec3_t mins, vec3_t maxs );
+    void    (*RegisterFont)( const char *fontName, int pointSize,
+                             fontInfo_t *font );
+    qboolean (*inPVS)( const vec3_t p1, const vec3_t p2 );
+} refexport_t;
+
+// The single exported linker symbol:
+refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp );
+```
+
+### `refimport_t` — engine functions the renderer imports
+
+```c
+// tr_public.h
+typedef struct {
+    void  (QDECL *Printf)( int printLevel, const char *fmt, ... );
+    void  (QDECL *Error)( int errorLevel, const char *fmt, ... );
+    int   (*Milliseconds)( void );
+    void *(*Hunk_Alloc)( int size, ha_pref pref );
+    void *(*Hunk_AllocateTempMemory)( int size );
+    void  (*Hunk_FreeTempMemory)( void *block );
+    void *(*Malloc)( int bytes );
+    void  (*Free)( void *buf );
+    cvar_t *(*Cvar_Get)( const char *name, const char *value, int flags );
+    void   (*Cvar_Set)( const char *name, const char *value );
+    int    (*FS_ReadFile)( const char *name, void **buf );
+    void   (*FS_FreeFile)( void *buf );
+    char **(*FS_ListFiles)( const char *name, const char *extension,
+                            int *numfilesfound );
+} refimport_t;
+```
+
+---
+
+## Server
+
+The server is the authoritative simulation host. It loads `qagame.qvm`, runs a game frame every tick, and delivers snapshots to clients.
+
+### Key entry points
+
+```c
+// server/sv_main.c
+void SV_Init( void );
+void SV_Frame( int msec );          // called from Com_Frame every tick
+void SV_Shutdown( const char *finalmsg );
+
+// server/sv_game.c — loads / calls qagame.qvm
+void SV_InitGameProgs( void );      // VM_Create("qagame", ...)
+void SV_ShutdownGameProgs( void );  // VM_Free(gvm)
+int  SV_GameSystemCalls( int *args );  // syscall handler for qagame
+
+// server/sv_snapshot.c
+void SV_SendClientMessages( void );
+void SV_BuildClientSnapshot( client_t *client );
+```
+
+### Protocol operations (server → client)
+
+Defined in `qcommon.h`:
+
+```c
+enum svc_ops_e {
+    svc_bad,
+    svc_nop,
+    svc_gamestate,       // initial game state on connect
+    svc_configstring,    // key/value pairs for assets and settings
+    svc_baseline,        // entity baselines in gamestate
+    svc_serverCommand,   // text command to execute on client
+    svc_download,        // file download chunk
+    svc_snapshot,        // world state update
+    svc_EOF
+};
+```
+
+---
+
+## Client
+
+The client connects to a server (local or remote), manages the rendering window, handles input, and delegates to `cgame.qvm` and `ui.qvm`.
+
+### Key entry points
+
+```c
+// client/cl_main.c
+void CL_Init( void );
+void CL_Frame( int msec );          // called from Com_Frame every tick
+void CL_Shutdown( void );
+void CL_Disconnect( qboolean showMainMenu );
+
+// client/cl_cgame.c — loads / calls cgame.qvm
+void CL_InitCGame( void );          // VM_Create("cgame", ...)
+void CL_ShutdownCGame( void );
+void CL_CGameRendering( stereoFrame_t stereo );
+
+// client/cl_ui.c — loads / calls ui.qvm
+void CL_InitUI( void );
+void CL_ShutdownUI( void );
+```
+
+### Protocol operations (client → server)
+
+```c
+enum clc_ops_e {
+    clc_bad,
+    clc_nop,
+    clc_move,            // usercmd_t — player input
+    clc_moveNoDelta,     // usercmd_t without delta
+    clc_clientCommand,   // text command string
+    clc_EOF
+};
+```
+
+---
+
+## Game Module (`qagame.qvm`)
+
+The game module implements server-side rules. The engine calls its numbered entry points via `VM_Call`.
+
+### Entry points (`gameExport_t`)
+
+```c
+// g_public.h
+typedef enum {
+    GAME_INIT,                    // (int levelTime, int randomSeed, int restart)
+    GAME_SHUTDOWN,                // (void)
+    GAME_CLIENT_CONNECT,          // (int clientNum, qboolean firstTime, qboolean isBot)
+    GAME_CLIENT_BEGIN,            // (int clientNum)
+    GAME_CLIENT_USERINFO_CHANGED, // (int clientNum)
+    GAME_CLIENT_DISCONNECT,       // (int clientNum)
+    GAME_CLIENT_COMMAND,          // (int clientNum)
+    GAME_CLIENT_THINK,            // (int clientNum)
+    GAME_RUN_FRAME,               // (int levelTime)
+    GAME_CONSOLE_COMMAND,         // (void)
+    BOTAI_START_FRAME             // (int time)
+} gameExport_t;
+```
+
+### System calls the game module can make (`gameImport_t`, selected)
+
+```c
+// g_public.h (selected entries)
+G_PRINT,                // Com_Printf
+G_ERROR,                // Com_Error
+G_MILLISECONDS,
+G_CVAR_REGISTER,
+G_CVAR_SET,
+G_FS_FOPEN_FILE,
+G_SEND_CONSOLE_COMMAND,
+G_LOCATE_GAME_DATA,     // register gentity_t array with server
+G_DROP_CLIENT,
+G_SEND_SERVER_COMMAND,
+G_SET_CONFIGSTRING,
+G_TRACE,                // collision detection
+G_LINKENTITY,
+G_UNLINKENTITY,
+BOTLIB_SETUP,           // (= 200) botlib interface
+```
+
+---
+
+## cgame Module (`cgame.qvm`)
+
+Runs on the client. Receives snapshots from the server, predicts player movement, and assembles the render scene.
+
+### Entry points (`cgameExport_t`)
+
+```c
+// cg_public.h
+typedef enum {
+    CG_INIT,             // (int serverMessageNum, int serverCommandSequence, int clientNum)
+    CG_SHUTDOWN,         // (void)
+    CG_CONSOLE_COMMAND,  // (void) → qboolean
+    CG_DRAW_ACTIVE_FRAME,// (int serverTime, stereoFrame_t stereoView, qboolean demoPlayback)
+    CG_CROSSHAIR_PLAYER, // (void) → int
+    CG_LAST_ATTACKER,    // (void) → int
+    CG_KEY_EVENT,        // (int key, qboolean down)
+    CG_MOUSE_EVENT,      // (int dx, int dy)
+    CG_EVENT_HANDLING    // (int type)
+} cgameExport_t;
+```
+
+### Snapshot structure
+
+```c
+// cg_public.h
+typedef struct {
+    int           snapFlags;      // SNAPFLAG_RATE_DELAYED, etc.
+    int           ping;
+    int           serverTime;     // server time this snapshot is valid for
+    byte          areamask[MAX_MAP_AREA_BYTES];  // portal visibility
+    playerState_t ps;             // full player state
+    int           numEntities;
+    entityState_t entities[MAX_ENTITIES_IN_SNAPSHOT];  // up to 256 entities
+    int           numServerCommands;
+    int           serverCommandSequence;
+} snapshot_t;
+```
+
+---
+
+## botlib
+
+The bot AI library provides the AAS (Area Awareness System) — pre-computed navigation data — and a complete bot AI stack (goal selection, movement, weapon choice, chat). It is integrated into the game module through a large set of engine traps in the `BOTLIB_*` range (starting at call number 200 in `g_public.h`).
+
+```c
+// g_public.h (botlib trap numbers)
+BOTLIB_SETUP = 200,
+BOTLIB_SHUTDOWN,
+BOTLIB_AAS_ENABLE_ROUTING_AREA = 300,
+BOTLIB_AAS_AREA_TRAVEL_TIME_TO_GOAL_AREA,
+BOTLIB_AAS_PREDICT_CLIENT_MOVEMENT,
+BOTLIB_EA_SAY = 400,           // entity actions
+BOTLIB_EA_ATTACK,
+BOTLIB_AI_LOAD_CHARACTER = 500,
+BOTLIB_AI_MOVE_TO_GOAL,
+// ... (dozens more)
+```

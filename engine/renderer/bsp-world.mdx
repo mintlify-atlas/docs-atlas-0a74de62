@@ -1,0 +1,162 @@
+---
+title: BSP World Rendering
+description: How Quake III Arena loads and renders BSP maps, including the lump format, PVS culling, surface types, and lightmaps.
+---
+
+The world map in Quake III Arena is stored as a Binary Space Partition (BSP) file (`.bsp`). The renderer loads it through `RE_LoadWorldMap()` in `renderer/tr_bsp.c`, which parses all lumps into the `world_t` struct (`tr_local.h`) and binds the result to `tr.world`.
+
+## BSP file format (IBSP version 46)
+
+The file begins with a `dheader_t` containing a magic number (`IBSP`) and version (`BSP_VERSION 46`), followed by an array of `lump_t` descriptors — one per data section.
+
+The lumps loaded by `RE_LoadWorldMap()` in order:
+
+```c
+R_LoadShaders     ( &header->lumps[LUMP_SHADERS]      );
+R_LoadLightmaps   ( &header->lumps[LUMP_LIGHTMAPS]    );
+R_LoadPlanes      ( &header->lumps[LUMP_PLANES]       );
+R_LoadFogs        ( &header->lumps[LUMP_FOGS], ... );
+R_LoadSurfaces    ( &header->lumps[LUMP_SURFACES],
+                    &header->lumps[LUMP_DRAWVERTS],
+                    &header->lumps[LUMP_DRAWINDEXES]  );
+R_LoadMarksurfaces( &header->lumps[LUMP_LEAFSURFACES] );
+R_LoadNodesAndLeafs(&header->lumps[LUMP_NODES],
+                    &header->lumps[LUMP_LEAFS]        );
+R_LoadSubmodels   ( &header->lumps[LUMP_MODELS]       );
+R_LoadVisibility  ( &header->lumps[LUMP_VISIBILITY]   );
+R_LoadEntities    ( &header->lumps[LUMP_ENTITIES]     );
+R_LoadLightGrid   ( &header->lumps[LUMP_LIGHTGRID]    );
+```
+
+### Key lumps
+
+| Lump | Contents |
+|---|---|
+| `LUMP_ENTITIES` | Text string of entity key/value pairs |
+| `LUMP_SHADERS` | Array of `dshader_t` (shader name + surface/content flags) |
+| `LUMP_PLANES` | `cplane_t` array, shared with collision model |
+| `LUMP_NODES` | BSP interior nodes |
+| `LUMP_LEAFS` | BSP leaf nodes (reference clusters and mark surfaces) |
+| `LUMP_LEAFSURFACES` | Indices into the surface array for each leaf |
+| `LUMP_MODELS` | Inline brush models (world + func_* entities) |
+| `LUMP_SURFACES` | Surface descriptors (type, shader, lightmap, vert range) |
+| `LUMP_DRAWVERTS` | `drawVert_t` vertex data (position, UVs, color, normal) |
+| `LUMP_DRAWINDEXES` | Triangle index data |
+| `LUMP_LIGHTMAPS` | 128×128 RGB lightmap images |
+| `LUMP_LIGHTGRID` | Volumetric lighting grid for dynamic entities |
+| `LUMP_VISIBILITY` | PVS cluster-to-cluster visibility bitsets |
+| `LUMP_FOGS` | Fog volume descriptors |
+
+## The `world_t` struct
+
+After loading, all world data lives in `s_worldData` (file-scope in `tr_bsp.c`), exposed as `tr.world`:
+
+```c
+typedef struct {
+    char        name[MAX_QPATH];       // e.g. "maps/q3dm1.bsp"
+    int         numShaders;
+    dshader_t  *shaders;
+    bmodel_t   *bmodels;               // inline brush models
+    int         numplanes;
+    cplane_t   *planes;
+    int         numnodes;
+    mnode_t    *nodes;                 // nodes and leafs share this array
+    int         numsurfaces;
+    msurface_t *surfaces;
+    int         numClusters;
+    int         clusterBytes;
+    const byte *vis;                   // PVS data
+    byte       *lightGridData;         // volumetric light grid
+    vec3_t      lightGridOrigin;
+    vec3_t      lightGridSize;
+    char       *entityString;          // raw entity lump text
+} world_t;
+```
+
+## Vis data and PVS
+
+PVS (Potentially Visible Set) data is a bitfield array: for each cluster, a bitmask of all other clusters that have line-of-sight. Clusters are derived from leaf groupings computed by `q3map`.
+
+At render time the renderer determines the current cluster from the camera's position in the BSP tree (`tr.viewCluster`). It then reads the corresponding row of the PVS bitfield to decide which clusters are visible. Leafs whose cluster is not set are skipped entirely.
+
+```c
+// Shared with the collision model subsystem
+void RE_SetWorldVisData( const byte *vis ) {
+    tr.externalVisData = vis;
+}
+```
+
+The vis data is shared with the clipmodel subsystem (set via `RE_SetWorldVisData`) to avoid storing two 1.8 MB copies in memory.
+
+The helper `R_inPVS( p1, p2 )` tests whether two world points are in each other's PVS, used by game code to determine audio and AI visibility.
+
+## BSP tree traversal
+
+The tree is traversed front-to-back by `R_RecursiveWorldNode()`. At each node the camera side is determined against the node plane; the near child is visited first. Leaf nodes contain lists of `msurface_t*` (mark surfaces). Each surface is stamped with `viewCount` so it is only added to the draw list once per frame even if it appears in multiple leaf lists.
+
+```c
+typedef struct mnode_s {
+    int          contents;       // CONTENTS_NODE (-1) for nodes
+    int          visframe;       // incremented when node is visited
+    vec3_t       mins, maxs;     // AABB for frustum culling
+    cplane_t    *plane;          // split plane (nodes only)
+    struct mnode_s *children[2];
+    int          cluster;        // PVS cluster index (leafs only)
+    msurface_t **firstmarksurface;
+    int          nummarksurfaces;
+} mnode_t;
+```
+
+## Surface types
+
+The `surfaceType_t` enum tags each surface for dispatch through `rb_surfaceTable[]`:
+
+```c
+typedef enum {
+    SF_BAD,
+    SF_SKIP,         // invisible / stripped surface
+    SF_FACE,         // planar polygon (srfSurfaceFace_t)
+    SF_GRID,         // Bezier patch mesh (srfGridMesh_t)
+    SF_TRIANGLES,    // arbitrary triangle soup (srfTriangles_t)
+    SF_POLY,         // runtime polygon added by cgame (srfPoly_t)
+    SF_MD3,          // MD3 model surface
+    SF_MD4,          // MD4 (MDR) skeletal surface
+    SF_FLARE,        // lens flare (srfFlare_t)
+    SF_ENTITY,       // beams, rails, lightning
+    SF_DISPLAY_LIST  // cached GL display list
+} surfaceType_t;
+```
+
+### Planar surfaces (`SF_FACE`)
+
+Stored as `srfSurfaceFace_t`. Contains a plane equation, a flat list of vertices, and an index array. These map directly to the flat polygon surfaces common in Q3A corridors and walls.
+
+### Patch/grid meshes (`SF_GRID`)
+
+Bezier patch surfaces from `q3map` are tessellated at load time by `R_SubdividePatchToGrid()` into `srfGridMesh_t`. The mesh stores LOD error values so the tessellation can be reduced with distance using `r_lodCurveError`.
+
+### Triangle soups (`SF_TRIANGLES`)
+
+Arbitrary triangulated geometry baked into the BSP by `q3map` from `misc_model` entities. Stored as `srfTriangles_t` with explicit vertex and index arrays.
+
+### Flares (`SF_FLARE`)
+
+Light flare markers (`srfFlare_t`) with origin, normal, and color. Rendered by `RB_RenderFlares()` after the main scene. The renderer tests occlusion using the depth buffer before drawing the flare quad.
+
+## Lightmaps
+
+Lightmaps are 128×128 RGB textures packed into `LUMP_LIGHTMAPS`. They are uploaded as `GL_RGB` or `GL_RGBA` images by `R_LoadLightmaps()` and stored in `tr.lightmaps[]`.
+
+Each surface references a lightmap index (`lightmapIndex`) and lightmap UV coordinates. Color shifting is applied at load time via `R_ColorShiftLightingBytes()` to account for `r_mapOverBrightBits`.
+
+<Tip>
+Set `r_vertexLight 1` to bypass lightmaps entirely and use per-vertex lighting instead, which improves performance at the cost of lighting quality.
+</Tip>
+
+## Light grid
+
+For dynamic entities (players, items) that move through the world, a 3D volumetric light grid is stored in `LUMP_LIGHTGRID`. The grid stores ambient and directional light colors at fixed spatial intervals defined by `lightGridSize`. `R_SetupEntityLighting()` trilinearly interpolates the grid to light each entity.
+
+## Inline brush models
+
+Func entities (doors, platforms, buttons) are stored as inline brush models (`bmodel_t`) inside `LUMP_MODELS`. The world geometry itself is model index 0. Each bmodel has its own surface list and an AABB for culling. They are rendered via `R_AddBrushModelSurfaces()` when the corresponding entity is added to the scene.

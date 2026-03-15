@@ -1,0 +1,126 @@
+---
+title: 'Client game overview'
+description: 'How the cgame QVM module translates server snapshots into a rendered frame, manages client-side prediction, and interfaces with the renderer.'
+---
+
+The **cgame** (client game) module is a QVM (Quake Virtual Machine) shared library loaded by the engine on the client side. It owns every visual and audio aspect of a running game: snapshot processing, entity interpolation, player prediction, HUD drawing, and weapon effects. Because the entire module is unloaded and reloaded on every level change there is no persistent data between maps; anything that must survive a map change must live in a CVar or in server-stored userinfo.
+
+## Role in the engine
+
+When the client connects to a server it receives a stream of **snapshots** — point-in-time views of the game world. The cgame module is responsible for:
+
+- Reading those snapshots and reconstructing the `centity_t` array that mirrors the server's `gentity_t` array.
+- Predicting the local player's movement ahead of the latest confirmed snapshot.
+- Building a render frame by calling into the renderer's `refexport_t` interface.
+- Drawing the 2-D HUD layer on top of the 3-D scene.
+
+## Lifecycle
+
+The engine drives the cgame module through a single entry point, `vmMain`, which dispatches on a command enum defined in `cgame/cg_public.h`.
+
+<Steps>
+  <Step title="Initialization">
+    The engine calls `CG_INIT`, which invokes `CG_Init(serverMessageNum, serverCommandSequence, clientNum)`. This function registers all CVars, loads graphics and sounds, and processes the initial gamestate configstrings.
+
+    ```c
+    void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum );
+    ```
+  </Step>
+
+  <Step title="Per-frame update">
+    Every rendered frame the engine calls `CG_DRAW_ACTIVE_FRAME`, which dispatches to:
+
+    ```c
+    void CG_DrawActiveFrame( int serverTime, stereoFrame_t stereoView, qboolean demoPlayback );
+    ```
+
+    This function runs prediction, advances local entities, then builds and submits a `refdef_t` to the renderer before drawing the 2-D HUD.
+  </Step>
+
+  <Step title="Shutdown">
+    On disconnect or map change the engine calls `CG_SHUTDOWN`, which flushes any open files and frees module resources.
+
+    ```c
+    void CG_Shutdown( void );
+    ```
+  </Step>
+</Steps>
+
+## Global state
+
+Two top-level structures hold all runtime state.
+
+| Structure | Description |
+|---|---|
+| `cg_t cg` | Per-frame mutable state: current snapshot pointers, prediction results, time values, HUD state. |
+| `cgs_t cgs` | Persistent static state loaded from the gamestate: configstrings, client info, media handles. |
+
+The entity array `centity_t cg_entities[MAX_GENTITIES]` mirrors the server entity list. Each `centity_t` holds `currentState` and `nextState` (`entityState_t`) for interpolation.
+
+## Snapshot processing
+
+`CG_ProcessSnapshots` (in `cg_snapshot.c`) polls the client system each frame with `trap_GetCurrentSnapshotNumber` and `trap_GetSnapshot`. It maintains two active snapshots:
+
+```c
+snapshot_t  *snap;      // cg.snap->serverTime <= cg.time
+snapshot_t  *nextSnap;  // cg.nextSnap->serverTime > cg.time, or NULL
+```
+
+The `frameInterpolation` fraction is computed as:
+
+```c
+cg.frameInterpolation = (float)(cg.time - cg.snap->serverTime)
+                      / (cg.nextSnap->serverTime - cg.snap->serverTime);
+```
+
+Entities whose `interpolate` flag is set are lerped between `currentState` and `nextState`; all others are simply placed at `currentState`.
+
+## Renderer interface
+
+The cgame module never accesses the renderer directly. All calls go through the trap layer, which forwards them to the `refexport_t` function table populated by the renderer DLL at startup.
+
+```c
+// Examples of renderer trap calls used by cgame
+trap_R_ClearScene();
+trap_R_AddRefEntityToScene( const refEntity_t *re );
+trap_R_AddLightToScene( const vec3_t org, float intensity, float r, float g, float b );
+trap_R_RenderScene( const refdef_t *fd );
+trap_R_DrawStretchPic( float x, float y, float w, float h, ... qhandle_t hShader );
+```
+
+The renderer handle (`qhandle_t`) returned by `trap_R_RegisterModel`, `trap_R_RegisterShader`, and `trap_R_RegisterSkin` is valid only for the lifetime of the current cgame instance. Because the `glconfig_t` cannot change without a full cgame reload, all handle registration must happen during `CG_Init`.
+
+## Client-side prediction
+
+To avoid waiting a full round-trip for movement confirmation, cgame runs `Pmove()` (the shared player-movement function from `bg_pmove.c`) locally for every unacknowledged user command.
+
+```c
+// cg_predict.c
+void CG_PredictPlayerState( void );
+```
+
+<Steps>
+  <Step title="Build the solid-entity list">
+    `CG_BuildSolidList` scans the current snapshot and separates entities into a `cg_solidEntities` array (used for collision) and a `cg_triggerEntities` array (items, teleporters).
+  </Step>
+  <Step title="Replay pending commands">
+    Starting from the last confirmed server frame, cgame re-executes every `usercmd_t` that has not yet been acknowledged, updating `cg.predictedPlayerState`.
+  </Step>
+  <Step title="Error smoothing">
+    When the server-confirmed position diverges from the predicted position (e.g. after a hit or teleport), `cg.predictedError` absorbs the difference and decays over `cg_errorDecay` milliseconds.
+  </Step>
+</Steps>
+
+<Note>
+When `cg_nopredict` is set to `1`, prediction is disabled and the client renders purely from the latest snapshot. This is useful for debugging desync issues.
+</Note>
+
+## Key CVars
+
+| CVar | Default | Purpose |
+|---|---|---|
+| `cg_nopredict` | `0` | Disable client-side prediction |
+| `cg_errorDecay` | `100` | Milliseconds over which prediction error decays |
+| `cg_synchronousClients` | `0` | Force all clients to run at the same frame rate |
+| `pmove_fixed` | `0` | Use fixed-timestep physics |
+| `pmove_msec` | `8` | Milliseconds per fixed physics step |

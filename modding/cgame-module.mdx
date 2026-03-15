@@ -1,0 +1,259 @@
+---
+title: "Cgame module"
+description: "Guide to modding cgame.qvm: the cgameExport_t interface, trap functions, HUD drawing, visual effects, weapon effects, renderer API, and reading player state."
+---
+
+The client game module (`cgame.qvm`) runs on every connected client. It receives snapshots from the server and turns them into a rendered 3D scene, a HUD overlay, and event-triggered sounds and effects. Because it runs client-side, it can be customized without affecting server authority.
+
+## Module entry point
+
+Like the game module, cgame has a single `vmMain` function (in `code/cgame/cg_main.c`) that the engine calls by command index:
+
+```c
+int vmMain( int command, int arg0, int arg1, int arg2,
+            int arg3, int arg4, int arg5, int arg6,
+            int arg7, int arg8, int arg9, int arg10, int arg11 ) {
+    switch ( command ) {
+    case CG_INIT:           CG_Init( arg0, arg1, arg2 );        return 0;
+    case CG_SHUTDOWN:       CG_Shutdown();                      return 0;
+    case CG_CONSOLE_COMMAND: return CG_ConsoleCommand();
+    case CG_DRAW_ACTIVE_FRAME:
+        CG_DrawActiveFrame( arg0, arg1, arg2 );  return 0;
+    case CG_CROSSHAIR_PLAYER: return CG_CrosshairPlayer();
+    case CG_LAST_ATTACKER:  return CG_LastAttacker();
+    case CG_KEY_EVENT:      CG_KeyEvent( arg0, arg1 );         return 0;
+    case CG_MOUSE_EVENT:    CG_MouseEvent( arg0, arg1 );       return 0;
+    case CG_EVENT_HANDLING: CG_EventHandling( arg0 );          return 0;
+    }
+    return -1;
+}
+```
+
+## cgameExport_t — functions the engine calls
+
+| Entry point | Signature | Description |
+|---|---|---|
+| `CG_INIT` | `CG_Init(serverMessageNum, serverCommandSequence, clientNum)` | Called when the level loads. Register all media (models, shaders, sounds). |
+| `CG_SHUTDOWN` | `CG_Shutdown()` | Flush and close any open resources. |
+| `CG_CONSOLE_COMMAND` | `CG_ConsoleCommand()` | Handle a local console command not recognized by the engine. Return `qtrue` if handled. |
+| `CG_DRAW_ACTIVE_FRAME` | `CG_DrawActiveFrame(serverTime, stereoView, demoPlayback)` | Build and render one frame. Called every rendered frame. |
+| `CG_CROSSHAIR_PLAYER` | `CG_CrosshairPlayer()` | Return the client number of the player currently under the crosshair, or -1. |
+| `CG_LAST_ATTACKER` | `CG_LastAttacker()` | Return the client number of the last player who attacked the local player. |
+| `CG_KEY_EVENT` | `CG_KeyEvent(key, down)` | A key was pressed or released while cgame owns the key catcher. |
+| `CG_MOUSE_EVENT` | `CG_MouseEvent(dx, dy)` | Mouse moved. |
+| `CG_EVENT_HANDLING` | `CG_EventHandling(type)` | Notify cgame it is gaining or losing input focus (e.g., when the scoreboard opens). |
+
+## cgameImport_t — trap functions available
+
+The full set of traps available to cgame code is defined in the `cgameImport_t` enum in `code/cgame/cg_public.h` and implemented in `code/cgame/cg_syscalls.c`.
+
+### Renderer
+
+```c
+// Registration (call during CG_Init)
+qhandle_t trap_R_RegisterModel( const char *name );
+qhandle_t trap_R_RegisterSkin( const char *name );
+qhandle_t trap_R_RegisterShader( const char *name );
+qhandle_t trap_R_RegisterShaderNoMip( const char *name ); // for HUD/2D shaders
+void      trap_R_RegisterFont( const char *name, int size, fontInfo_t *font );
+
+// Scene building (call each frame inside CG_DrawActiveFrame)
+void trap_R_ClearScene( void );
+void trap_R_AddRefEntityToScene( const refEntity_t *re );
+void trap_R_AddPolyToScene( qhandle_t shader, int numVerts, const polyVert_t *verts );
+void trap_R_AddPolysToScene( qhandle_t shader, int numVerts, const polyVert_t *verts, int num );
+void trap_R_AddLightToScene( const vec3_t org, float intensity, float r, float g, float b );
+void trap_R_AddAdditiveLightToScene( const vec3_t org, float intensity, float r, float g, float b );
+void trap_R_RenderScene( const refdef_t *fd );
+
+// 2D drawing
+void trap_R_SetColor( const float *rgba );   // NULL resets to white
+void trap_R_DrawStretchPic( float x, float y, float w, float h,
+                             float s1, float t1, float s2, float t2,
+                             qhandle_t shader );
+
+// Utilities
+int  trap_R_LightForPoint( vec3_t point, vec3_t ambientLight,
+                            vec3_t directedLight, vec3_t lightDir );
+void trap_R_ModelBounds( clipHandle_t model, vec3_t mins, vec3_t maxs );
+int  trap_R_LerpTag( orientation_t *tag, clipHandle_t mod,
+                     int startFrame, int endFrame, float frac, const char *tagName );
+void trap_R_RemapShader( const char *oldShader, const char *newShader,
+                         const char *timeOffset );
+```
+
+### Sound
+
+```c
+sfxHandle_t trap_S_RegisterSound( const char *sample, qboolean compressed );
+void trap_S_StartSound( vec3_t origin, int entityNum, int entchannel, sfxHandle_t sfx );
+void trap_S_StartLocalSound( sfxHandle_t sfx, int channelNum );
+void trap_S_AddLoopingSound( int entityNum, const vec3_t origin,
+                              const vec3_t velocity, sfxHandle_t sfx );
+void trap_S_StopLoopingSound( int entityNum );
+void trap_S_Respatialize( int entityNum, const vec3_t origin,
+                           vec3_t axis[3], int inwater );
+void trap_S_StartBackgroundTrack( const char *intro, const char *loop );
+void trap_S_StopBackgroundTrack( void );
+```
+
+### Snapshot and game state
+
+```c
+void     trap_GetGameState( gameState_t *gamestate );
+void     trap_GetCurrentSnapshotNumber( int *snapshotNumber, int *serverTime );
+qboolean trap_GetSnapshot( int snapshotNumber, snapshot_t *snapshot );
+qboolean trap_GetServerCommand( int serverCommandNumber );
+int      trap_GetCurrentCmdNumber( void );
+qboolean trap_GetUserCmd( int cmdNumber, usercmd_t *ucmd );
+void     trap_SetUserCmdValue( int stateValue, float sensitivityScale );
+```
+
+## Modifying the HUD
+
+HUD drawing lives in `code/cgame/cg_draw.c`. The main entry point called every frame is:
+
+```c
+void CG_DrawActiveFrame( int serverTime, stereoFrame_t stereoView,
+                         qboolean demoPlayback );
+```
+
+Inside this function, `CG_DrawHud` (or equivalent) draws each HUD element by calling `trap_R_DrawStretchPic` for images and `CG_DrawString` / `CG_DrawBigString` for text.
+
+### Adding a custom HUD element
+
+```c
+// Example: draw a custom ammo counter at a fixed screen position
+static void CG_DrawMyAmmoCounter( void ) {
+    char    text[32];
+    int     ammo;
+    vec4_t  color = { 1.0f, 0.8f, 0.0f, 1.0f };  // gold
+
+    ammo = cg.snap->ps.ammo[ cg.snap->ps.weapon ];
+    Com_sprintf( text, sizeof(text), "AMMO: %i", ammo );
+
+    // draw at virtual 640x480 coordinates
+    trap_R_SetColor( color );
+    CG_DrawString( 10, 420, text, UI_SMALLFONT, color );
+    trap_R_SetColor( NULL );  // reset color
+}
+```
+
+Call your function from inside `CG_DrawActiveFrame` (or `CG_Draw2D` if it exists in your version).
+
+### Reading player state
+
+The current snapshot is always available in the global `cg.snap`:
+
+```c
+// key fields
+cg.snap->ps.health             // current health
+cg.snap->ps.stats[STAT_ARMOR]  // current armor
+cg.snap->ps.ammo[weapon]       // ammo for each weapon
+cg.snap->ps.weapon             // currently held weapon
+cg.snap->ps.powerups[PW_QUAD]  // time remaining on quad damage
+cg.snap->ps.persistant[PERS_SCORE] // current score
+cg.snap->ps.persistant[PERS_RANK]  // current rank
+```
+
+Enemy and teammate entity states are in `cg.snap->entities[]`. These are `entityState_t` values replicated from the server.
+
+## Adding new visual effects
+
+Effects are spawned as `localEntity_t` objects managed in `code/cgame/cg_localents.c`. A local entity lives only on the client and is not replicated.
+
+```c
+// Spawn a sprite effect
+localEntity_t *le = CG_AllocLocalEntity();
+le->leType          = LE_SPRITE_EXPLOSION;
+le->startTime       = cg.time;
+le->endTime         = cg.time + 1000;
+le->pos.trType      = TR_STATIONARY;
+VectorCopy( origin, le->pos.trBase );
+le->color[0] = le->color[1] = le->color[2] = le->color[3] = 1.0f;
+le->radius          = 30;
+le->refEntity.reType = RT_SPRITE;
+le->refEntity.customShader = cgs.media.dishFlashShader;
+```
+
+Particle trails and smoke puffs follow the same pattern using `LE_PUFF` or `LE_MOVE_SCALE_FADE` types.
+
+## Modifying weapon effects and impact marks
+
+Weapon muzzle flash, projectile trail, and impact effects are handled in `code/cgame/cg_weapons.c`.
+
+- **Muzzle flash**: `CG_AddPlayerWeapon` adds a dynamic light and fires the flash model.
+- **Projectile trail**: `CG_GrenadeTrail`, `CG_RocketTrail`, and similar functions add smoke/spark local entities along the missile path.
+- **Impact effects**: `CG_MissileHitWall` and `CG_MissileHitPlayer` spawn explosion local entities and play impact sounds.
+
+To change the rocket explosion radius visually:
+
+```c
+// In CG_MissileHitWall, change the sprite size:
+bubble->radius = 64;  // was 32
+```
+
+To add a new impact decal:
+
+```c
+// Register a decal shader in CG_RegisterGraphics:
+cgs.media.myImpactMark = trap_R_RegisterShader( "marks/mymark" );
+
+// Apply it in your hit function:
+CG_ImpactMark( cgs.media.myImpactMark, origin, dir, random()*360,
+               1, 1, 1, 1, qtrue, 24, qfalse );
+```
+
+## Working with the renderer API
+
+All 3D rendering uses the `refEntity_t` structure:
+
+```c
+typedef struct {
+    refEntityType_t   reType;      // RT_MODEL, RT_POLY, RT_SPRITE, ...
+    int               renderfx;
+    qhandle_t         hModel;
+    vec3_t            lightingOrigin;
+    float             shadowPlane;
+    vec3_t            axis[3];      // orientation
+    qboolean          nonNormalizedAxes;
+    vec3_t            origin;
+    int               frame;
+    vec3_t            oldorigin;
+    int               oldframe;
+    float             backlerp;
+    int               skinNum;
+    qhandle_t         customSkin;
+    qhandle_t         customShader;
+    byte              shaderRGBA[4];
+    float             shaderTexCoord[2];
+    float             shaderTime;
+    float             radius;
+    float             rotation;
+} refEntity_t;
+```
+
+A complete frame render cycle:
+
+```c
+// 1. Clear the scene
+trap_R_ClearScene();
+
+// 2. Add entities
+trap_R_AddRefEntityToScene( &myEntity );
+
+// 3. Add lights
+trap_R_AddLightToScene( origin, intensity, r, g, b );
+
+// 4. Build refdef and render
+refdef_t refdef;
+memset( &refdef, 0, sizeof(refdef) );
+refdef.x = 0;  refdef.y = 0;
+refdef.width  = cgs.glconfig.vidWidth;
+refdef.height = cgs.glconfig.vidHeight;
+refdef.time   = cg.time;
+VectorCopy( cg.refdefViewAngles, refdef.viewangles );
+AnglesToAxis( refdef.viewangles, refdef.viewaxis );
+VectorCopy( cg.refdef.vieworg, refdef.vieworg );
+trap_R_RenderScene( &refdef );
+```

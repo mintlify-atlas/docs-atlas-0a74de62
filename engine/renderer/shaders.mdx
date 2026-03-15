@@ -1,0 +1,246 @@
+---
+title: Shader System
+description: How Quake III Arena's text-based shader scripts are parsed into multi-pass OpenGL rendering instructions.
+---
+
+A "shader" in Quake III Arena is **not** a GPU program. It is a named text script stored in `.shader` files under `scripts/` inside a PK3 archive. Each shader script describes how a surface looks: which textures to apply, how to blend them, how to animate them, and in what order to draw them relative to other surfaces.
+
+The struct that holds a compiled shader at runtime is `shader_t`, defined in `renderer/tr_local.h`.
+
+## Shader scripts
+
+A shader script looks like this:
+
+```c
+textures/base_wall/proto_fence
+{
+    qer_editorimage textures/base_wall/proto_fence.tga
+    surfaceparm trans
+    surfaceparm nonsolid
+    cull disable
+    {
+        map textures/base_wall/proto_fence.tga
+        alphaFunc GE128
+        depthWrite
+        rgbGen identity
+    }
+}
+```
+
+Each top-level block is a **shader definition**: the name, optional global keywords, and one or more stage blocks enclosed in `{ }`.
+
+## Shader stages
+
+Each stage (`shaderStage_t`) corresponds to one OpenGL rendering pass over the surface. Up to `MAX_SHADER_STAGES` (8) stages are allowed.
+
+### Texture map keywords
+
+| Keyword | Effect |
+|---|---|
+| `map <path>` | Load a texture; wraps with `GL_REPEAT` |
+| `clampmap <path>` | Load a texture; wraps with `GL_CLAMP` |
+| `animmap <fps> <frames…>` | Cycle through a list of textures at the given frame rate |
+| `lightmap` | Use the surface's pre-baked lightmap texture |
+| `videomap <roq>` | Stream a RoQ cinematic as the texture |
+
+### Blend modes — `blendFunc`
+
+`blendFunc` sets `glBlendFunc`. The renderer translates named shortcuts:
+
+| Script shortcut | Equivalent |
+|---|---|
+| `add` | `GL_ONE GL_ONE` |
+| `filter` | `GL_DST_COLOR GL_ZERO` |
+| `blend` | `GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA` |
+
+Arbitrary OpenGL blend factors can be written directly (`GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA`).
+
+### Texture coordinate generation — `tcGen`
+
+| Value | Meaning |
+|---|---|
+| `base` | Standard model UVs (`TCGEN_TEXTURE`) |
+| `lightmap` | Lightmap UVs (`TCGEN_LIGHTMAP`) |
+| `environment` | Sphere-mapped environment (`TCGEN_ENVIRONMENT_MAPPED`) |
+| `vector ( sx sy sz ) ( tx ty tz )` | World-space projection (`TCGEN_VECTOR`) |
+
+### Texture coordinate modifiers — `tcMod`
+
+Multiple `tcMod` directives stack in order. Each compiles into a `texModInfo_t`:
+
+```c
+typedef enum {
+    TMOD_NONE,
+    TMOD_TRANSFORM,
+    TMOD_TURBULENT,
+    TMOD_SCROLL,
+    TMOD_SCALE,
+    TMOD_STRETCH,
+    TMOD_ROTATE,
+    TMOD_ENTITY_TRANSLATE
+} texMod_t;
+```
+
+Example — scrolling lava:
+```c
+{
+    map textures/liquids/lava.tga
+    tcMod scroll 0.25 0.1
+    tcMod turb 0 0.2 0 0.05
+    blendFunc GL_ONE GL_ZERO
+}
+```
+
+### Color generation — `rgbGen`
+
+Controls how per-vertex or constant RGB color is produced at render time:
+
+| Value | Source (`colorGen_t`) |
+|---|---|
+| `identity` | Always `(1,1,1)` (`CGEN_IDENTITY`) |
+| `identityLighting` | `1.0 / (1 << overbrightBits)` |
+| `vertex` | Per-vertex color from mesh (`CGEN_VERTEX`) |
+| `entity` | From `refEntity_t.shaderRGBA` |
+| `wave <func> <base> <amp> <phase> <freq>` | Waveform (`CGEN_WAVEFORM`) |
+| `lightingDiffuse` | Computed diffuse from light grid |
+| `const ( r g b )` | Fixed color (`CGEN_CONST`) |
+
+### Alpha generation — `alphaGen`
+
+| Value | Source (`alphaGen_t`) |
+|---|---|
+| `identity` | Always 1.0 (`AGEN_IDENTITY`) |
+| `entity` | From `refEntity_t.shaderRGBA[3]` |
+| `vertex` | Per-vertex alpha |
+| `lightingSpecular` | Specular highlight |
+| `wave <func> …` | Waveform |
+| `portal <range>` | Fade out with distance for portal surfaces |
+| `const <value>` | Fixed alpha |
+
+## Sort order
+
+The global `sort` keyword overrides the automatic sort value. The `shaderSort_t` enum controls draw order within a frame:
+
+```c
+typedef enum {
+    SS_BAD,
+    SS_PORTAL,        // mirrors, portals, viewscreens
+    SS_ENVIRONMENT,   // sky box
+    SS_OPAQUE,        // standard world surfaces
+    SS_DECAL,         // scorch marks
+    SS_SEE_THROUGH,   // grates, ladders
+    SS_BANNER,
+    SS_FOG,
+    SS_UNDERWATER,
+    SS_BLEND0,        // regular transparency
+    SS_BLEND1,        // additive effects
+    SS_BLEND2,
+    SS_BLEND3,
+    SS_BLEND6,
+    SS_STENCIL_SHADOW,
+    SS_ALMOST_NEAREST, // smoke puffs
+    SS_NEAREST         // blood blobs
+} shaderSort_t;
+```
+
+## Parsing and compilation
+
+All `.shader` files are scanned and hashed at startup by `R_InitShaders()`. The text is stored in `shaderTextHashTable` keyed by shader name. When a surface needs a shader, `R_FindShader()` looks up the text block and calls the parsing path:
+
+<Steps>
+  <Step title="Find the text block">
+    `R_FindShader()` hashes the name into `shaderTextHashTable` to retrieve the unparsed text.
+  </Step>
+  <Step title="Parse global keywords">
+    The parser reads top-level directives such as `cull`, `sort`, `polygonOffset`, `nomipmaps`, `sky`, `fog`, and `deformVertexes`.
+  </Step>
+  <Step title="Parse stages">
+    Each inner `{ }` block is parsed into a temporary `shaderStage_t`. Map keywords, blending, tcGen, tcMod, rgbGen, and alphaGen are all collected here.
+  </Step>
+  <Step title="Optimise">
+    After all stages are parsed, the renderer chooses an optimal stage iterator function (`optimalStageIteratorFunc`) — e.g. `RB_StageIteratorLightmappedMultitexture` for the common two-pass lightmap case — and fills in flags.
+  </Step>
+  <Step title="Copy to heap">
+    The temporary `shader_t` is copied into hunk memory and inserted into `tr.shaders[]` and `tr.sortedShaders[]`.
+  </Step>
+</Steps>
+
+## The `shader_t` struct
+
+Key fields from `tr_local.h`:
+
+```c
+typedef struct shader_s {
+    char            name[MAX_QPATH];
+    int             lightmapIndex;    // must match for lookup
+    int             index;            // position in tr.shaders[]
+    int             sortedIndex;      // position in tr.sortedShaders[]
+    float           sort;             // draw order
+    qboolean        defaultShader;    // fallback if load failed
+    qboolean        isSky;
+    skyParms_t      sky;
+    fogParms_t      fogParms;
+    float           portalRange;
+    cullType_t      cullType;         // CT_FRONT_SIDED, CT_BACK_SIDED, CT_TWO_SIDED
+    qboolean        polygonOffset;
+    int             numDeforms;
+    deformStage_t   deforms[MAX_SHADER_DEFORMS];
+    int             numUnfoggedPasses;
+    shaderStage_t  *stages[MAX_SHADER_STAGES];
+    void          (*optimalStageIteratorFunc)( void );
+    struct shader_s *remappedShader;  // for RE_RemapShader
+} shader_t;
+```
+
+## Special shader types
+
+### Sky shaders
+
+A sky shader sets `isSky = qtrue` and fills `skyParms_t` (six outer-box images and six inner-box images, plus cloud height). The back end renders them via `RB_StageIteratorSky()`, which calls `R_DrawSkyBox()` and `R_BuildCloudData()`.
+
+```c
+// Example sky shader fragment
+skies/oa_sky
+{
+    sky
+    {
+        skyParms - 512 -
+    }
+    {
+        map textures/skies/oa_skycloud.tga
+        tcMod scroll 0.1 0
+        tcMod scale 3 3
+        blendFunc GL_ONE GL_ZERO
+        depthWrite
+    }
+}
+```
+
+### Portal shaders
+
+Portal surfaces (`sort portal`) render a recursive view from the portal's position before the rest of the scene. They are identified by `SS_PORTAL` sort order and the `RDF_*` flags in the `refdef_t`.
+
+### Decal shaders
+
+Decals use `polygonOffset` to push them slightly in front of the underlying surface (avoids z-fighting) and are sorted at `SS_DECAL`. They typically use `blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA` with an alpha-tested texture.
+
+## Vertex deformations
+
+The `deformVertexes` keyword adds geometry deformation (`deformStage_t`):
+
+| Type | `deform_t` constant | Effect |
+|---|---|---|
+| `wave` | `DEFORM_WAVE` | Sine/square/triangle displacement |
+| `normal` | `DEFORM_NORMALS` | Ripple normals |
+| `bulge` | `DEFORM_BULGE` | Bulge along texture coordinates |
+| `move` | `DEFORM_MOVE` | Translate verts by a waveform |
+| `autosprite` | `DEFORM_AUTOSPRITE` | Billboard facing viewer |
+| `autosprite2` | `DEFORM_AUTOSPRITE2` | Axis-aligned billboard |
+
+## Waveform functions
+
+All wave-based effects share `waveForm_t { func, base, amplitude, phase, frequency }`. Available functions (`genFunc_t`): `GF_SIN`, `GF_SQUARE`, `GF_TRIANGLE`, `GF_SAWTOOTH`, `GF_INVERSE_SAWTOOTH`, `GF_NOISE`.
+
+## Shader remapping
+
+`R_RemapShader( oldName, newName, timeOffset )` redirects all lookups for `oldName` to point at `newName`. This is how map scripts swap team-coloured textures at runtime without reloading assets.

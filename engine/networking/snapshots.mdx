@@ -1,0 +1,132 @@
+---
+title: 'Snapshot system'
+description: 'How sv_snapshot.c builds delta-compressed snapshots, what clSnapshot_t contains, and how the client interpolates between frames.'
+---
+
+The **snapshot system** is the core of Quake III Arena's networking model. Instead of sending individual entity events, the server periodically captures the full game state as a **snapshot** and sends only the fields that changed since the last acknowledged snapshot.
+
+## What is a snapshot?
+
+On the client side a snapshot is a `snapshot_t` (exposed to cgame via `cg_public.h`):
+
+```c
+typedef struct {
+    int           snapFlags;         // SNAPFLAG_RATE_DELAYED, etc.
+    int           ping;
+    int           serverTime;        // server time this snapshot is valid for
+    byte          areamask[MAX_MAP_AREA_BYTES];  // portal visibility bits
+    playerState_t ps;                // complete local player state
+    int           numEntities;
+    entityState_t entities[MAX_ENTITIES_IN_SNAPSHOT];  // up to 256 entities
+    int           numServerCommands;
+    int           serverCommandSequence;
+} snapshot_t;
+```
+
+Internally the client stores snapshots as `clSnapshot_t` which holds indices into a large circular `cl.parseEntities[]` buffer rather than copying entity data.
+
+## Building a snapshot (server side)
+
+`SV_BuildClientSnapshot` (in `sv_snapshot.c`) constructs a `clientSnapshot_t` for each active client every server tick:
+
+<Steps>
+  <Step title="PVS culling">
+    The server determines which areas the client can see using the area-portal visibility mask (`areabytes`/`areabits`). Only entities in visible areas are included.
+  </Step>
+  <Step title="Entity selection">
+    All linked server entities (`svEntity_t`) are iterated. Entities marked `SVF_NOCLIENT` are excluded. Player entities not in the client's PVS may still be included if they are in the same area.
+  </Step>
+  <Step title="Player state">
+    The local `playerState_t` is copied directly; it is always fully present in the snapshot.
+  </Step>
+  <Step title="Write to client">
+    `SV_WriteSnapshotToClient` serializes the snapshot into the outgoing `msg_t`.
+  </Step>
+</Steps>
+
+## Delta encoding
+
+### Entity deltas
+
+`SV_EmitPacketEntities` (in `sv_snapshot.c`) compares the new `clientSnapshot_t` entity list against the previous acknowledged snapshot (`oldframe`):
+
+```c
+static void SV_EmitPacketEntities( clientSnapshot_t *from,
+                                   clientSnapshot_t *to,
+                                   msg_t *msg );
+```
+
+For each entity:
+
+| Condition | Action |
+|---|---|
+| Entity exists in both frames | `MSG_WriteDeltaEntity(msg, oldent, newent, qfalse)` — only changed fields are written |
+| New entity (not in old frame) | `MSG_WriteDeltaEntity(msg, &baseline, newent, qtrue)` — delta from stored baseline |
+| Removed entity (not in new frame) | `MSG_WriteDeltaEntity(msg, oldent, NULL, qtrue)` — removal marker |
+
+The entity list is terminated with entity number `MAX_GENTITIES - 1`.
+
+### Field-level delta compression
+
+`MSG_WriteDeltaEntity` and `MSG_ReadDeltaEntity` (in `qcommon/msg.c`) compare two `entityState_t` structs field by field using a pre-defined field description table. Only fields that differ are written, each preceded by a field-index bit. Unchanged entities produce zero bytes.
+
+```c
+void MSG_WriteDeltaEntity( msg_t *msg,
+                           struct entityState_s *from,
+                           struct entityState_s *to,
+                           qboolean force );
+void MSG_ReadDeltaEntity( msg_t *msg,
+                          entityState_t *from,
+                          entityState_t *to,
+                          int number );
+```
+
+Player state uses separate delta functions:
+
+```c
+void MSG_WriteDeltaPlayerstate( msg_t *msg,
+                                struct playerState_s *from,
+                                struct playerState_s *to );
+void MSG_ReadDeltaPlayerstate( msg_t *msg,
+                               struct playerState_s *from,
+                               struct playerState_s *to );
+```
+
+## Snapshot flags
+
+| Flag | Meaning |
+|---|---|
+| `SNAPFLAG_RATE_DELAYED` | Server held this snapshot because the client's rate was exceeded |
+| `SNAPFLAG_NOT_ACTIVE` | Client is not yet `CS_ACTIVE` (loading) |
+| `SNAPFLAG_SERVERCOUNT` | Server count bit, toggled on map restart |
+
+## Client interpolation
+
+The cgame module keeps two snapshots active at all times:
+
+```c
+snapshot_t *snap;      // cg.snap->serverTime <= cg.time
+snapshot_t *nextSnap;  // cg.nextSnap->serverTime > cg.time
+```
+
+The interpolation fraction is:
+
+```c
+cg.frameInterpolation =
+    (float)(cg.time - cg.snap->serverTime)
+    / (float)(cg.nextSnap->serverTime - cg.snap->serverTime);
+```
+
+Entities with `centity_t.interpolate == qtrue` lerp their origin and angles between `currentState` and `nextState`. Entities that teleported between frames skip interpolation.
+
+### Extrapolation
+
+When `cg.nextSnap` is `NULL` (snapshot not yet received), the engine **extrapolates** entity positions using their `trajectory_t` data (`TR_LINEAR`, `TR_GRAVITY`, etc.) rather than interpolating. This keeps movement smooth during transient packet loss.
+
+## Packet backup depth
+
+`PACKET_BACKUP` (32) frames are kept on both the server (`client_t.frames[]`) and the client (`cl.snapshots[]`). If the client's `deltaMessage` is more than `PACKET_BACKUP - 3` frames old the server sends a full (non-delta) snapshot.
+
+<Warning>
+If no valid delta base exists for more than 32 frames the client will receive a full snapshot, which is significantly larger. High packet loss can cause a cascade of large packets that further worsens congestion.
+</Warning>

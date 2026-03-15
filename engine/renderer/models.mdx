@@ -1,0 +1,139 @@
+---
+title: Model Formats
+description: How Quake III Arena loads and renders MD3, MD4/MDR, and inline BSP brush models.
+---
+
+The renderer supports three categories of model:
+
+| Category | `modtype_t` | Description |
+|---|---|---|
+| MD3 | `MOD_MESH` | Keyframe-animated triangle mesh |
+| MD4 / MDR | `MOD_MD4` | Skeletal / weighted mesh (Team Arena) |
+| BSP inline | `MOD_BRUSH` | Brush geometry embedded in the map |
+
+All model handles are opaque `qhandle_t` integers. The renderer stores up to `MAX_MOD_KNOWN` (1024) models in `tr.models[]`.
+
+## Registering a model
+
+```c
+qhandle_t RE_RegisterModel( const char *name );
+```
+
+`RE_RegisterModel` in `tr_model.c` checks the model cache, attempts to load the file, and returns a handle. A return value of `0` means the model failed to load; a cached `model_t` with `name` but no data prevents repeated disk hits for missing assets.
+
+LOD variants are loaded automatically: `RE_RegisterModel` tries `_1.md3`, `_2.md3` suffixes for lower LOD levels and stores them in `md3Header_t *md3[MD3_MAX_LODS]`.
+
+```c
+model_t *R_AllocModel( void );          // allocate a new model slot
+model_t *R_GetModelByHandle( qhandle_t ); // look up by handle
+```
+
+## MD3 format
+
+MD3 is Q3A's primary model format. Key structures (from `qcommon/qfiles.h`):
+
+### `md3Header_t`
+
+```c
+typedef struct {
+    int     ident;          // MD3_IDENT ("IDP3")
+    int     version;        // MD3_VERSION (15)
+    char    name[MAX_QPATH];
+    int     flags;
+    int     numFrames;
+    int     numTags;
+    int     numSurfaces;
+    int     numSkins;
+    int     ofsFrames;      // offset to md3Frame_t array
+    int     ofsTags;        // offset to md3Tag_t array
+    int     ofsSurfaces;    // offset to first md3Surface_t
+    int     ofsEnd;
+} md3Header_t;
+```
+
+### Frames
+
+Each `md3Frame_t` stores a bounding sphere (origin + radius) and a bounding box for the frame, used for frustum and occlusion culling. The renderer uses the frame data during `R_CullLocalPointAndRadius` per entity.
+
+### Surfaces
+
+Each `md3Surface_t` within a model is an independent triangle mesh with its own shader list, vertex array, and index array. Vertices are stored as compressed 16-bit shorts (`md3XyzNormal_t`) scaled by `MD3_XYZ_SCALE` (1/64). Normals are encoded as a lat/long pair.
+
+### Tags
+
+Tags (`md3Tag_t`) are named coordinate frames attached to the model. They define attachment points for child models — for example, the weapon attached to a player's hand. The tag system is accessed through:
+
+```c
+int R_LerpTag( orientation_t *tag, qhandle_t handle,
+               int startFrame, int endFrame,
+               float frac, const char *tagName );
+```
+
+This function interpolates the tag's position and axes between two frames using linear interpolation of the translation and orthonormalised slerp of the axes.
+
+### Loading
+
+`R_LoadMD3()` in `tr_model.c` is called with a raw file buffer. It:
+
+1. Validates the ident and version fields.
+2. Byte-swaps all integers (the model is stored little-endian on disk).
+3. Resolves shader names per surface: for each named shader in the surface, it calls `R_FindShader()` and stores the resulting `shader_t*`.
+4. Stores the loaded header pointer in `model->md3[lod]`.
+
+## Frame interpolation
+
+MD3 animation is keyframe-based. The client game sets `refEntity_t.frame` and `refEntity_t.oldframe` with a `backlerp` fraction (0.0 = current frame, 1.0 = old frame). In the back end, `RB_SurfaceMesh()` linearly interpolates vertex positions between the two frames:
+
+```c
+// From the refEntity_t struct (cgame/tr_types.h)
+typedef struct {
+    int     frame;       // current animation frame
+    int     oldframe;    // previous frame for interpolation
+    float   backlerp;    // 0.0 = frame, 1.0 = oldframe
+    // ...
+} refEntity_t;
+```
+
+The interpolation runs on the CPU and feeds the tesselator (`tess`) with world-space positions before the back end draws them.
+
+## MD4 / MDR (skeletal models)
+
+The `MOD_MD4` type uses `md4Header_t` (also called MDR — skeletal with bone weights). Key differences from MD3:
+
+- Vertices store up to 4 bone weights instead of being fully keyframed.
+- Animation is performed by `R_AddAnimSurfaces()` and `RB_SurfaceAnim()`.
+- The format supports smooth skeletal deformation suitable for complex character animation.
+
+MDR models are loaded by `R_LoadMD4()` and stored in `model->md4`.
+
+## Inline BSP brush models
+
+Func entities compile into inline models stored in `LUMP_MODELS` of the BSP. They use type `MOD_BRUSH` and store a `bmodel_t` pointer. These are not loaded through `RE_RegisterModel` — they are registered by `R_LoadSubmodels()` during `RE_LoadWorldMap()` and then referenced by the entity's model string (e.g., `"*1"`).
+
+Brush models are rendered by `R_AddBrushModelSurfaces()`, which applies the entity's current transform, checks against the frustum, and queues each face surface for drawing.
+
+## Skins
+
+Skins allow texture substitution without modifying the model file. A `.skin` file maps surface names to shader names. The renderer stores them as `skin_t`:
+
+```c
+typedef struct skin_s {
+    char         name[MAX_QPATH];
+    int          numSurfaces;
+    skinSurface_t *surfaces[MD3_MAX_SURFACES];
+} skin_t;
+```
+
+At render time, when a surface shader would be looked up, the skin's surface list is checked first. Registered via `RE_RegisterSkin( name )`.
+
+## LOD selection
+
+The renderer selects the LOD level for MD3 models based on distance from the camera. The active LOD index is clamped to `model->numLods - 1`. The cvar `r_lodbias` adjusts the bias value and `r_lodscale` controls the distance scaling.
+
+## Debugging
+
+| Cvar | Effect |
+|---|---|
+| `r_drawentities 0` | Disable all entity rendering |
+| `r_speeds 1` | Show front/back-end timing and surface counts |
+| `r_shownormals 1` | Draw wireframe surface normals |

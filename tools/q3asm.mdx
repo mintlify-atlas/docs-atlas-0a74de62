@@ -1,0 +1,230 @@
+---
+title: q3asm
+description: The QVM assembler and linker. Reads assembly output from LCC and produces .qvm bytecode files for the Quake III Virtual Machine.
+---
+
+`q3asm` is the assembler and linker for the Quake III Virtual Machine (QVM). It reads one or more `.asm` files produced by the LCC compiler and combines them into a single self-contained `.qvm` bytecode file that the engine can load and execute.
+
+Source: `q3asm/q3asm.c`
+
+---
+
+## What q3asm does
+
+q3asm performs a two-pass assembly:
+
+- **Pass 1** — resolves all symbol addresses and calculates segment sizes.
+- **Pass 2** — emits the final bytecode image with all references patched.
+
+It also functions as a **linker**: a `.q3asm` script file lists every `.asm` translation unit to include, and q3asm merges them into one image, resolving cross-file symbol references.
+
+---
+
+## Invocation
+
+```bash
+q3asm -f <scriptfile>
+```
+
+The `-f` flag points to a `.q3asm` script (without the extension). q3asm reads the script to find the output path and the list of input `.asm` files.
+
+### Example — compiling the game QVM
+
+From `code/game/game.sh`:
+
+```bash
+q3asm -f ../game
+```
+
+This reads `../game.q3asm` (see below) and writes `qagame.qvm`.
+
+---
+
+## The `.q3asm` linker script
+
+A `.q3asm` file is a plain-text list. The first line specifies the output path with `-o`; every subsequent line is the path to an `.asm` file (without extension) to link in.
+
+### `code/game/game.q3asm`
+
+```text
+-o "\quake3\baseq3\vm\qagame"
+g_main
+..\g_syscalls
+bg_misc
+bg_lib
+bg_pmove
+bg_slidemove
+q_math
+q_shared
+ai_dmnet
+ai_dmq3
+ai_team
+ai_main
+ai_chat
+ai_cmd
+ai_vcmd
+g_active
+g_arenas
+g_bot
+g_client
+g_cmds
+g_combat
+g_items
+g_mem
+g_misc
+g_missile
+g_mover
+g_session
+g_spawn
+g_svcmds
+g_target
+g_team
+g_trigger
+g_utils
+g_weapon
+```
+
+<Note>
+The file listed first (`g_main`) must contain the `vmMain` entry-point function. The engine calls `vmMain` to dispatch all game events.
+</Note>
+
+### `code/cgame/cgame.q3asm`
+
+```text
+-o "\quake3\baseq3\vm\cgame"
+cg_main
+..\cg_syscalls
+cg_consolecmds
+cg_draw
+cg_drawtools
+...
+bg_lib
+bg_misc
+q_math
+q_shared
+```
+
+---
+
+## QVM segments
+
+The assembler maintains four named segments (defined in `q3asm.c:128`):
+
+| Segment | Purpose |
+|---------|---------|
+| `CODESEG` | Executable bytecode instructions |
+| `DATASEG` | Initialised 32-bit data (byte-swapped for portability) |
+| `LITSEG` | String literals |
+| `BSSSEG` | Zero-initialised (BSS) data |
+
+Assembler directives in `.asm` files switch between segments:
+
+```asm
+code
+  ; instructions go here
+data
+  ; initialised data
+lit
+  ; string constants
+bss
+  ; uninitialised data
+```
+
+---
+
+## QVM opcode set
+
+The complete opcode enumeration is defined in `q3asm.c:35–119`. Key categories:
+
+### Control flow
+
+| Opcode | Description |
+|--------|-------------|
+| `OP_ENTER` | Begin a procedure frame |
+| `OP_LEAVE` | End a procedure frame |
+| `OP_CALL` | Call a function |
+| `OP_JUMP` | Unconditional branch |
+| `OP_PUSH` / `OP_POP` | Stack manipulation |
+
+### Integer comparison & branch
+
+| Opcode | Description |
+|--------|-------------|
+| `OP_EQ` / `OP_NE` | Equal / not-equal |
+| `OP_LTI` / `OP_LEI` / `OP_GTI` / `OP_GEI` | Signed comparisons |
+| `OP_LTU` / `OP_LEU` / `OP_GTU` / `OP_GEU` | Unsigned comparisons |
+
+### Floating-point comparison
+
+| Opcode | Description |
+|--------|-------------|
+| `OP_EQF` / `OP_NEF` | Float equal / not-equal |
+| `OP_LTF` / `OP_LEF` / `OP_GTF` / `OP_GEF` | Float comparisons |
+
+### Memory access
+
+| Opcode | Description |
+|--------|-------------|
+| `OP_LOAD1` / `OP_LOAD2` / `OP_LOAD4` | Load 1/2/4-byte value |
+| `OP_STORE1` / `OP_STORE2` / `OP_STORE4` | Store 1/2/4-byte value |
+| `OP_ARG` | Push a function argument |
+| `OP_BLOCK_COPY` | Copy a block of memory |
+
+### Arithmetic
+
+| Opcode | Description |
+|--------|-------------|
+| `OP_ADD` / `OP_SUB` / `OP_MULI` / `OP_DIVI` | Integer arithmetic |
+| `OP_ADDF` / `OP_SUBF` / `OP_MULF` / `OP_DIVF` | Float arithmetic |
+| `OP_BAND` / `OP_BOR` / `OP_BXOR` / `OP_BCOM` | Bitwise operations |
+| `OP_LSH` / `OP_RSHI` / `OP_RSHU` | Bit shifts |
+| `OP_NEGI` / `OP_NEGF` | Negate integer / float |
+| `OP_SEX8` / `OP_SEX16` | Sign-extend 8/16-bit |
+
+### Type conversion
+
+| Opcode | Description |
+|--------|-------------|
+| `OP_CVIF` | Convert integer to float |
+| `OP_CVFI` | Convert float to integer |
+
+---
+
+## Executable header
+
+The structure written at the start of a `.qvm` file (`q3asm.c:121–127`):
+
+```c
+typedef struct {
+    int  imageBytes;   // total size after decompression
+    int  entryPoint;   // offset of vmMain in CODESEG
+    int  stackBase;    // base address of the VM stack
+    int  stackSize;    // size of the VM stack
+} executableHeader_t;
+```
+
+Following the header the four segments are written in order: `CODESEG`, `DATASEG`, `LITSEG`, `BSSSEG`.
+
+---
+
+## Maximum image size
+
+The in-memory image for any single segment is capped at 4 MB (`MAX_IMAGE = 0x400000`, defined in `q3asm.c:136`). Complex mods that exceed this limit must reduce code size or split functionality across multiple QVMs.
+
+---
+
+## Building q3asm itself
+
+<Tabs>
+  <Tab title="Windows">
+    Open `q3asm/q3asm.sln` in Visual C++ 2003 and build the solution. The output is `q3asm.exe`.
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    cd q3asm
+    make
+    ```
+  </Tab>
+</Tabs>
+
+Precompiled Windows binaries (`q3asm.exe`) are also available under `code/win32/mod-sdk-setup/bin/`.

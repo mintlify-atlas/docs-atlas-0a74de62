@@ -1,0 +1,200 @@
+---
+title: Weapons
+description: All weapons in Quake III Arena, their fire functions, the damage system, knockback, and item respawn logic.
+---
+
+Weapon logic lives in `game/g_weapon.c`. The server calls `FireWeapon( gentity_t *ent )` each time a client's `usercmd_t` has the attack button held and the weapon state machine reaches `WEAPON_FIRING`. Weapon types are defined in `bg_public.h`:
+
+```c
+typedef enum {
+    WP_NONE,
+    WP_GAUNTLET,
+    WP_MACHINEGUN,
+    WP_SHOTGUN,
+    WP_GRENADE_LAUNCHER,
+    WP_ROCKET_LAUNCHER,
+    WP_LIGHTNING,
+    WP_RAILGUN,
+    WP_PLASMAGUN,
+    WP_BFG,
+    WP_GRAPPLING_HOOK,
+    WP_NUM_WEAPONS
+} weapon_t;
+```
+
+## Weapon reference
+
+<AccordionGroup>
+  <Accordion title="Gauntlet (WP_GAUNTLET)">
+    **Function:** `CheckGauntletAttack()`
+
+    Performs a 32-unit trace in the forward direction from the muzzle point. On a hit against a damageable entity:
+    - Sends `EV_MISSILE_HIT` temp entity for the blood effect.
+    - Calls `G_Damage( target, ent, ent, forward, endpos, 50, 0, MOD_GAUNTLET )`.
+    - Quad damage multiplies: `damage = 50 * s_quadFactor`.
+
+    The Gauntlet is the default melee weapon and cannot be dropped.
+  </Accordion>
+
+  <Accordion title="Machine Gun (WP_MACHINEGUN)">
+    **Function:** `Bullet_Fire( ent, MACHINEGUN_SPREAD, MACHINEGUN_DAMAGE )`
+
+    Hitscan: fires a single bullet trace to 8192*16 units. Spread is applied via random polar offsets:
+    - `MACHINEGUN_SPREAD`: 200 (non-team), `MACHINEGUN_TEAM_DAMAGE`: 5 hp/hit
+    - `MACHINEGUN_DAMAGE`: 7 hp/hit
+    - Calls `G_Damage` with `MOD_MACHINEGUN`.
+  </Accordion>
+
+  <Accordion title="Shotgun (WP_SHOTGUN)">
+    **Functions:** `weapon_supershotgun_fire()` → `ShotgunPattern()` → `ShotgunPellet()`
+
+    Fires `DEFAULT_SHOTGUN_COUNT` (11) pellets in a deterministic spread pattern seeded with a random byte. The seed is sent to clients so they can reproduce the identical pattern on the cgame side.
+    - `DEFAULT_SHOTGUN_SPREAD`: 700
+    - `DEFAULT_SHOTGUN_DAMAGE`: 10 hp per pellet → up to 110 hp per shot
+    - Calls `G_Damage` with `MOD_SHOTGUN` per pellet hit.
+  </Accordion>
+
+  <Accordion title="Grenade Launcher (WP_GRENADE_LAUNCHER)">
+    **Function:** `weapon_grenadelauncher_fire()`
+
+    Spawns a grenade projectile via `fire_grenade()`. The muzzle forward vector gets `+0.2f` on Z for a slight upward arc. The projectile bounces (`EF_BOUNCE`) and explodes on contact or after a timer via `G_RadiusDamage`.
+  </Accordion>
+
+  <Accordion title="Rocket Launcher (WP_ROCKET_LAUNCHER)">
+    **Function:** `Weapon_RocketLauncher_Fire()`
+
+    Spawns a rocket via `fire_rocket( ent, muzzle, forward )`. The rocket entity travels in a straight line and calls `G_RadiusDamage` on impact. Splash damage is applied via `DAMAGE_RADIUS`.
+  </Accordion>
+
+  <Accordion title="Lightning Gun (WP_LIGHTNING)">
+    **Function:** `Weapon_LightningFire()`
+
+    Fires a hitscan trace to `LIGHTNING_RANGE` (768 units) each server frame the weapon is held. Damage is 8 hp per frame (`damage = 8 * s_quadFactor`). The `EF_FIRING` flag on the player entity triggers the lightning beam visual on clients. Calls `G_Damage` with `MOD_LIGHTNING`.
+  </Accordion>
+
+  <Accordion title="Railgun (WP_RAILGUN)">
+    **Function:** `weapon_railgun_fire()`
+
+    Fires a piercing hitscan that passes through up to `MAX_RAIL_HITS` (4) entities:
+    - Damage: **100 hp** per hit (`100 * s_quadFactor`), `MOD_RAILGUN`.
+    - After each damageable entity is hit, that entity is unlinked and the trace continues.
+    - Two consecutive hits in a row grant the "Impressive" award.
+    - A `EV_RAILTRAIL` temp entity marks the beam endpoint and player for colored trail rendering.
+  </Accordion>
+
+  <Accordion title="Plasma Gun (WP_PLASMAGUN)">
+    **Function:** `Weapon_Plasmagun_Fire()`
+
+    Spawns a plasma bolt via `fire_plasma( ent, muzzle, forward )`. Bolts travel fast and apply small splash damage on impact. Calls `G_Damage` with `MOD_PLASMA` (direct) or `MOD_PLASMA_SPLASH`.
+  </Accordion>
+
+  <Accordion title="BFG10K (WP_BFG)">
+    **Function:** `BFG_Fire()`
+
+    Spawns a BFG projectile via `fire_bfg( ent, muzzle, forward )`. Both `m->damage` and `m->splashDamage` are multiplied by `s_quadFactor`. On detonation applies heavy radius damage (`MOD_BFG`, `MOD_BFG_SPLASH`).
+  </Accordion>
+
+  <Accordion title="Grappling Hook (WP_GRAPPLING_HOOK)">
+    **Function:** `Weapon_GrapplingHook_Fire()`
+
+    Launches a hook projectile via `fire_grapple()`. While the hook is in flight or latched, `PMF_GRAPPLE_PULL` is set and `Weapon_HookThink()` updates `ps->grapplePoint` so the pmove code pulls the player toward it. The hook is freed by `Weapon_HookFree()` when the fire button is released.
+  </Accordion>
+</AccordionGroup>
+
+## Damage system — `G_Damage`
+
+All damage in the game flows through:
+
+```c
+void G_Damage(
+    gentity_t *targ,       // entity receiving damage
+    gentity_t *inflictor,  // entity causing damage (projectile, etc.)
+    gentity_t *attacker,   // player who fired
+    vec3_t     dir,        // direction of impact
+    vec3_t     point,      // world point of impact
+    int        damage,     // base damage amount
+    int        dflags,     // DAMAGE_* flags
+    int        mod         // meansOfDeath_t
+);
+```
+
+The function (in `g_combat.c`):
+
+1. Checks `DAMAGE_NO_PROTECTION` and `FL_GODMODE` flags.
+2. Applies armor absorption: `armor` absorbs `ARMOR_PROTECTION` (0.66) of damage up to the armor amount.
+3. Subtracts from `targ->health`.
+4. If health falls below 0, calls `targ->die()`.
+5. Sends `EV_PAIN` event for pain sounds/animation.
+
+### Damage flags
+
+```c
+#define DAMAGE_RADIUS          0x01  // indirect (splash)
+#define DAMAGE_NO_ARMOR        0x02  // bypasses armor
+#define DAMAGE_NO_KNOCKBACK    0x04  // no velocity change
+#define DAMAGE_NO_PROTECTION   0x08  // ignores all protection
+```
+
+### Radius damage
+
+```c
+qboolean G_RadiusDamage(
+    vec3_t origin, gentity_t *attacker,
+    float damage, float radius,
+    gentity_t *ignore, int mod
+);
+```
+
+Falls off linearly from `damage` at the center to `0` at `radius`. Calls `CanDamage()` (which traces for obstructions) before applying `G_Damage` with `DAMAGE_RADIUS`.
+
+## Knockback
+
+Knockback is applied inside `G_Damage` when the damage direction is available and `DAMAGE_NO_KNOCKBACK` is not set:
+
+```c
+kbdir = dir * damage * g_knockback.value * mass_factor
+targ->client->ps.velocity += kbdir;
+```
+
+The `g_knockback` cvar (default 1000) scales all knockback. Splash damage (`DAMAGE_RADIUS`) uses the vector from the explosion origin to the target center with an upward bias (`dir[2] += 24`) to push players into the air.
+
+## Gib threshold
+
+When health falls below `GIB_HEALTH` (-40), `GibEntity()` is called:
+
+```c
+#define GIB_HEALTH  -40
+```
+
+`GibEntity` sends `EV_GIB_PLAYER`, sets `s.eType = ET_INVISIBLE`, and clears the entity's contents so it is removed from the world. The gib visual is entirely client-side.
+
+## Means of death
+
+The `meansOfDeath_t` enum (`MOD_*`) tags kills for obituary messages and award tracking:
+
+| MOD | Weapon / cause |
+|---|---|
+| `MOD_GAUNTLET` | Gauntlet |
+| `MOD_MACHINEGUN` | Machine Gun |
+| `MOD_SHOTGUN` | Shotgun |
+| `MOD_GRENADE` / `MOD_GRENADE_SPLASH` | Grenade Launcher |
+| `MOD_ROCKET` / `MOD_ROCKET_SPLASH` | Rocket Launcher |
+| `MOD_LIGHTNING` | Lightning Gun |
+| `MOD_RAILGUN` | Railgun |
+| `MOD_PLASMA` / `MOD_PLASMA_SPLASH` | Plasma Gun |
+| `MOD_BFG` / `MOD_BFG_SPLASH` | BFG |
+| `MOD_WATER` | Drowning |
+| `MOD_LAVA` | Lava |
+| `MOD_TELEFRAG` | Teleporter |
+| `MOD_FALLING` | Fall damage |
+| `MOD_SUICIDE` | Killed self |
+| `MOD_CRUSH` | Crushed by mover |
+
+## Weapon respawn
+
+After a weapon is picked up, its entity is hidden and `SetRespawn()` sets a think function to call `RespawnItem()` after the delay:
+
+- `g_weaponrespawn` (default 5 s) — non-team modes
+- `g_weaponTeamRespawn` (default 30 s) — team modes
+
+The Gauntlet and Machine Gun are starter weapons and are **never** dropped on death. Other weapons with ammo are dropped via `TossClientItems()` when the player dies.

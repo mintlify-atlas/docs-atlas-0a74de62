@@ -1,0 +1,71 @@
+---
+title: Tools overview
+description: An overview of the Quake III Arena toolchain — from C source code to compiled maps and QVM bytecode.
+---
+
+The Quake III Arena GPL source release ships the complete set of tools used to build the game's content and virtual-machine modules. Each tool plays a distinct role in the pipeline that transforms human-readable source into engine-ready assets.
+
+## The Q3A toolchain
+
+### Game logic (QVM pipeline)
+
+Game, client-game, and UI code is compiled to `.qvm` bytecode rather than native machine code. This allows mods to run sandboxed inside the engine regardless of platform. The pipeline has two stages:
+
+```
+.c files
+  └─ lcc (q3lcc / lcc + q3cpp + q3rcc)  →  .asm files
+       └─ q3asm  →  .qvm bytecode
+```
+
+1. **LCC** (`lcc/`) — a retargetable C compiler. Its Q3A backend (`q3rcc`) emits QVM assembly instead of native machine instructions. The driver binary is `q3lcc` (or `lcc` on Windows); it invokes `q3cpp` (preprocessor) and `q3rcc` (code generator) internally.
+2. **q3asm** (`q3asm/`) — the QVM assembler and linker. It reads one or more `.asm` files listed in a `.q3asm` script and writes a single `.qvm` bytecode file.
+
+### Map content pipeline
+
+Levels are authored in Q3Radiant and exported through q3map:
+
+```
+.map (brush geometry + entities)
+  └─ q3map -bsp   →  raw BSP geometry
+       └─ q3map -vis   →  visibility data added
+            └─ q3map -light  →  lightmaps baked into final .bsp
+```
+
+3. **q3map** (`q3map/`) — the BSP map compiler. Converts Quake `.map` text files to binary `.bsp` files that the engine can load directly.
+4. **Q3Radiant** (`q3radiant/`) — the GUI map editor (build 200f). Authors create and texture brushes, place entities, and invoke q3map from within the editor.
+
+### Bot navigation
+
+5. **bspc** (`code/bspc/`) — converts compiled `.bsp` files into `.aas` (Area Awareness System) navigation files used by the bot AI.
+
+---
+
+## Tool pages
+
+<CardGroup cols={2}>
+  <Card title="LCC compiler" icon="code" href="/tools/lcc-compiler">
+    The retargetable C compiler that turns game C code into QVM assembly.
+  </Card>
+  <Card title="q3asm" icon="microchip" href="/tools/q3asm">
+    The QVM assembler and linker that produces `.qvm` bytecode files.
+  </Card>
+  <Card title="q3map" icon="map" href="/tools/q3map">
+    The BSP map compiler: `.map` → `.bsp` with visibility and lighting passes.
+  </Card>
+  <Card title="Q3Radiant" icon="pencil" href="/tools/q3radiant">
+    The GUI map editor used to create and compile levels.
+  </Card>
+</CardGroup>
+
+---
+
+## Quick reference: output files
+
+| Tool | Input | Output | Destination |
+|------|-------|--------|-------------|
+| `lcc` / `q3lcc` | `.c` | `.asm` | `code/game/vm/` |
+| `q3asm` | `.asm` + `.q3asm` script | `.qvm` | `baseq3/vm/` |
+| `q3map -bsp` | `.map` | `.bsp` (partial) | `baseq3/maps/` |
+| `q3map -vis` | `.bsp` | `.bsp` (+ vis data) | `baseq3/maps/` |
+| `q3map -light` | `.bsp` | `.bsp` (+ lightmaps) | `baseq3/maps/` |
+| `bspc` | `.bsp` | `.aas` | `baseq3/botfiles/` |

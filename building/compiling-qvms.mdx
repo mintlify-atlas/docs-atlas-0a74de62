@@ -1,0 +1,288 @@
+---
+title: Compiling QVM modules
+description: Full walkthrough of the QVM compilation pipeline — from C source through LCC and q3asm to deployable .qvm bytecode files for game, cgame, and ui.
+---
+
+The Quake III Virtual Machine (QVM) allows game logic to run sandboxed inside the engine on any supported platform. The three QVM modules are:
+
+| Module | Output file | Source directory |
+|--------|-------------|------------------|
+| Server-game | `qagame.qvm` | `code/game/` |
+| Client-game | `cgame.qvm` | `code/cgame/` |
+| User interface | `ui.qvm` | `code/q3_ui/` or `code/ui/` |
+
+---
+
+## The full pipeline
+
+```
+C source files (.c)
+  │
+  ├─ q3cpp  (C preprocessor)
+  │
+  ├─ q3rcc  (QVM code generator)  →  .asm files (one per .c)
+  │
+  └─ q3asm  (assembler + linker)  →  .qvm  (single bytecode image)
+             reads .q3asm script
+```
+
+The LCC driver (`lcc` / `q3lcc`) orchestrates `q3cpp` and `q3rcc` automatically. You only invoke `q3asm` once at the end, passing it the `.q3asm` linker script.
+
+---
+
+## Required tools
+
+Precompiled Windows binaries are provided in `lcc/bin/` and `code/win32/mod-sdk-setup/bin/`:
+
+| Binary | Source |
+|--------|--------|
+| `lcc.exe` / `q3lcc` | `lcc/` |
+| `q3cpp.exe` | `lcc/cpp/` |
+| `q3rcc.exe` | `lcc/src/` |
+| `q3asm.exe` | `q3asm/` |
+
+All four must be on `PATH` (or in `./qvmtools/` on Linux) before running the build scripts.
+
+---
+
+## The `.q3asm` linker scripts
+
+Each module has a `.q3asm` script that tells q3asm where to write the output and which `.asm` translation units to link together.
+
+### Format
+
+```text
+-o "<output path without extension>"
+<module1>      ← must contain vmMain (the entry point)
+<module2>
+...
+```
+
+### `code/game/game.q3asm`
+
+```text
+-o "\quake3\baseq3\vm\qagame"
+g_main
+..\g_syscalls
+bg_misc
+bg_lib
+bg_pmove
+bg_slidemove
+q_math
+q_shared
+ai_dmnet
+ai_dmq3
+ai_team
+ai_main
+ai_chat
+ai_cmd
+ai_vcmd
+g_active
+g_arenas
+g_bot
+g_client
+g_cmds
+g_combat
+g_items
+g_mem
+g_misc
+g_missile
+g_mover
+g_session
+g_spawn
+g_svcmds
+g_target
+g_team
+g_trigger
+g_utils
+g_weapon
+```
+
+### `code/cgame/cgame.q3asm`
+
+```text
+-o "\quake3\baseq3\vm\cgame"
+cg_main
+..\cg_syscalls
+cg_consolecmds
+cg_draw
+cg_drawtools
+cg_effects
+cg_ents
+cg_event
+cg_info
+cg_localents
+cg_marks
+cg_players
+cg_playerstate
+cg_predict
+cg_scoreboard
+cg_servercmds
+cg_snapshot
+cg_view
+cg_weapons
+bg_slidemove
+bg_pmove
+bg_lib
+bg_misc
+q_math
+q_shared
+```
+
+<Note>
+The first `.asm` file in each script (`g_main`, `cg_main`) must define the `vmMain` function. The engine calls `vmMain` to dispatch all events to the module.
+</Note>
+
+---
+
+## Running the build scripts
+
+<Tabs>
+  <Tab title="Linux / macOS">
+    <Steps>
+      <Step title="Build the game QVM">
+        ```bash
+        cd code/game
+        sh game.sh
+        ```
+        The script creates `vm/`, compiles each `.c` to `.asm` inside it, then runs:
+        ```bash
+        q3asm -f ../game
+        ```
+      </Step>
+      <Step title="Build cgame">
+        ```bash
+        cd code/cgame
+        sh cgame.sh
+        ```
+      </Step>
+      <Step title="Build the UI">
+        ```bash
+        cd code/q3_ui
+        sh q3_ui.sh
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Windows">
+    <Steps>
+      <Step title="Set up PATH">
+        ```bat
+        set PATH=%PATH%;C:\path\to\lcc\bin
+        ```
+      </Step>
+      <Step title="Build the game QVM">
+        ```bat
+        cd code\game
+        game.bat
+        ```
+      </Step>
+      <Step title="Build cgame">
+        ```bat
+        cd code\cgame
+        cgame.bat
+        ```
+      </Step>
+      <Step title="Build the UI">
+        ```bat
+        cd code\q3_ui
+        q3_ui.bat
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+---
+
+## What each script does
+
+Taking `game.sh` as the canonical example:
+
+```bash
+#!/bin/sh
+mkdir -p vm
+cd vm
+
+# compile every .c file to .asm
+CC="q3lcc -DQ3_VM -S -Wf-target=bytecode -Wf-g \
+    -I../../cgame -I../../game -I../../q3_ui"
+
+$CC ../g_main.c        # → vm/g_main.asm
+$CC ../g_syscalls.c    # → vm/g_syscalls.asm
+$CC ../bg_misc.c
+# ... (all remaining source files)
+
+# link all .asm files into qagame.qvm
+q3asm -f ../game
+```
+
+Key flags:
+
+| Flag | Effect |
+|------|--------|
+| `-DQ3_VM` | Preprocessor symbol; selects QVM code paths (e.g. uses `bg_lib.c` instead of libc) |
+| `-S` | Output assembly only, do not invoke the assembler |
+| `-Wf-target=bytecode` | Tell q3rcc to emit QVM bytecode assembly |
+| `-Wf-g` | Emit debug label information into the `.asm` |
+
+---
+
+## Output location
+
+The `.q3asm` scripts specify the output path. For the standard Q3A modules it is:
+
+```
+\quake3\baseq3\vm\qagame.qvm
+\quake3\baseq3\vm\cgame.qvm
+\quake3\baseq3\vm\ui.qvm
+```
+
+On Linux the path is resolved relative to the working directory. Copy the output `.qvm` files to your game installation:
+
+```bash
+cp code/game/vm/qagame.qvm  /path/to/quake3/baseq3/vm/
+cp code/cgame/vm/cgame.qvm  /path/to/quake3/baseq3/vm/
+cp code/q3_ui/vm/ui.qvm     /path/to/quake3/baseq3/vm/
+```
+
+---
+
+## Team Arena variants
+
+Team Arena (mission pack) has its own linker scripts that output to `missionpack/vm/` and define `-DMISSIONPACK`:
+
+| Script | Output |
+|--------|--------|
+| `code/game/game_ta.q3asm` | `missionpack/vm/qagame.qvm` |
+| `code/cgame/cgame_ta.q3asm` | `missionpack/vm/cgame.qvm` |
+
+To build them on Windows, pass `-DMISSIONPACK` as a parameter to the batch file:
+
+```bat
+game.bat -DMISSIONPACK
+```
+
+On Linux, use the corresponding `*_ta.sh` scripts if present, or pass the flag manually:
+
+```bash
+CC="q3lcc -DQ3_VM -DMISSIONPACK -S -Wf-target=bytecode -Wf-g ..."
+```
+
+---
+
+## QVM vs. native shared libraries
+
+| | `.qvm` | `.so` / `.dll` |
+|-|--------|---------------|
+| **Platform** | Any (bytecode interpreted by engine) | Platform-specific |
+| **Distribution** | Single file works on all platforms | Need separate builds per OS/CPU |
+| **Performance** | Slightly lower (interpretation overhead) | Native speed |
+| **Security** | Sandboxed; cannot call arbitrary OS functions | Full native access |
+| **Development** | Requires lcc + q3asm toolchain | Any C compiler |
+
+<Tip>
+Use native `.so`/`.dll` during development for faster iteration (recompile with your system compiler). Ship `.qvm` files in your mod's `.pk3` for cross-platform distribution.
+</Tip>
+
+When both are present, the engine gives preference to `.qvm`. The `+set vm_game 0` console variable forces the engine to load the native module instead.

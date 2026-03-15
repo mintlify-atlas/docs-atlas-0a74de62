@@ -1,122 +1,152 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Quake III Arena",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#C75000",
+    "light": "#FF7A2F",
+    "dark": "#8B3000"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/id-Software/Quake-III-Arena"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/id-Software/Quake-III-Arena"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Overview",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "quickstart-building",
+              "repository-layout"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Architecture",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
-            ]
-          },
-          {
-            "group": "Writing content",
-            "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
-            ]
-          },
-          {
-            "group": "AI tools",
-            "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "architecture/overview",
+              "architecture/engine-modules",
+              "architecture/qvm-virtual-machine",
+              "architecture/client-server"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Engine",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Renderer",
             "pages": [
-              "api-reference/introduction"
+              "engine/renderer/overview",
+              "engine/renderer/shaders",
+              "engine/renderer/bsp-world",
+              "engine/renderer/models"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Game Logic",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "engine/game/overview",
+              "engine/game/entities",
+              "engine/game/player-movement",
+              "engine/game/weapons",
+              "engine/game/game-types"
+            ]
+          },
+          {
+            "group": "Client Game",
+            "pages": [
+              "engine/cgame/overview",
+              "engine/cgame/hud-and-ui",
+              "engine/cgame/effects-and-particles"
+            ]
+          },
+          {
+            "group": "Networking",
+            "pages": [
+              "engine/networking/overview",
+              "engine/networking/server",
+              "engine/networking/client",
+              "engine/networking/snapshots"
+            ]
+          },
+          {
+            "group": "Bot AI",
+            "pages": [
+              "engine/botai/overview",
+              "engine/botai/aas-system",
+              "engine/botai/bot-behaviors"
+            ]
+          },
+          {
+            "group": "Common Systems",
+            "pages": [
+              "engine/common/cvar-system",
+              "engine/common/filesystem",
+              "engine/common/console-commands",
+              "engine/common/sound"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Tools",
+        "groups": [
+          {
+            "group": "Compilers & Tools",
+            "pages": [
+              "tools/overview",
+              "tools/q3asm",
+              "tools/lcc-compiler",
+              "tools/q3map",
+              "tools/q3radiant"
+            ]
+          },
+          {
+            "group": "Building",
+            "pages": [
+              "building/windows",
+              "building/linux",
+              "building/macos",
+              "building/compiling-qvms"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Modding",
+        "groups": [
+          {
+            "group": "Mod Development",
+            "pages": [
+              "modding/introduction",
+              "modding/qvm-mods",
+              "modding/game-module",
+              "modding/cgame-module",
+              "modding/ui-module"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "modding/cvars-reference",
+              "modding/console-commands-reference",
+              "modding/entity-reference"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

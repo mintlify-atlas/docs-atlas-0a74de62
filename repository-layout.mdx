@@ -1,0 +1,190 @@
+---
+title: "Repository Layout"
+description: "Directory-by-directory guide to the Quake III Arena GPL source tree."
+---
+
+The GPL source tree is split into the game engine, the QVM toolchain, the map compiler, and the map editor. The `README.txt` at the root gives a brief summary; this page expands every directory with more detail.
+
+## Top-Level Directories
+
+| Directory | Description |
+|---|---|
+| `code/` | All engine and game C source code |
+| `lcc/` | The LCC retargetable C compiler, used to compile game C code into QVM assembly |
+| `q3asm/` | Assembler that takes LCC output (`.asm`) and produces QVM bytecode (`.qvm`) |
+| `q3map/` | BSP map compiler — converts `.map` files to `.bsp` (ships at version Q3Radiant 200f) |
+| `q3radiant/` | Q3Radiant map editor, build 200f |
+| `common/` | Shared utility code used by both `q3radiant` and `q3map` |
+| `libs/` | Third-party library support used by radiant and tools (pak file handling, JPEG, etc.) |
+| `ui/` | Additional UI scripts/assets (distinct from the in-engine `code/q3_ui/` C sources) |
+
+---
+
+## `code/` — Engine Source
+
+This is the heart of the repository. All directories below are relative to `code/`.
+
+### `code/qcommon/`
+
+Code shared between the client and the server that is **not** part of the game logic or the renderer.
+
+| File / Group | Purpose |
+|---|---|
+| `common.c` | Engine initialisation (`Com_Init`), the main loop (`Com_Frame`), memory managers (hunk, zone) |
+| `qcommon.h` | Shared API declarations — networking types, VM interface, command buffer, cvars, filesystem |
+| `vm.c` | QVM loader, `VM_Create`, `VM_Call`, `VM_Free`, symbol loading |
+| `vm_local.h` | Internal VM structures: `vm_t`, `vmSymbol_t`, `opcode_t` enum |
+| `vm_interpreted.c` | Pure C bytecode interpreter (`VM_CallInterpreted`) |
+| `vm_x86.c` | x86 JIT compiler (`VM_Compile`, `VM_CallCompiled`, `AsmCall`) |
+| `cmd.c` | Command buffer and console command registration |
+| `cvar.c` | Console variable system |
+| `files.c` | Pak/pk3 filesystem, `FS_ReadFile`, `FS_WriteFile` |
+| `msg.c` | Bit-level network message serialisation (`msg_t`, `MSG_WriteBits`, delta functions) |
+| `net_*.c` | Network layer, Netchan packet fragmentation and sequencing |
+| `huffman.c` | Huffman compression used by the network layer |
+| `unzip.c` | zlib-based pk3 (zip) file reading |
+| `md4.c` | MD4 checksum for pak file validation |
+| `cm_*.c` | Collision-map (BSP clipmap) loading and queries |
+
+### `code/client/`
+
+The client subsystem handles window management, input, sound, cinematics, and the connection to a server.
+
+| File | Purpose |
+|---|---|
+| `cl_main.c` | Client initialisation (`CL_Init`), `CL_Frame`, connect / disconnect logic |
+| `cl_parse.c` | Parses server-to-client packets (`svc_snapshot`, `svc_gamestate`, `svc_configstring`) |
+| `cl_cgame.c` | Loads and calls the `cgame` QVM module |
+| `cl_net_chan.c` | Client-side reliable channel over Netchan |
+| `cl_input.c` | Samples keyboard, mouse, joystick and builds `usercmd_t` |
+| `cl_scrn.c` | Screen update, loading screens |
+| `cl_ui.c` | Loads and calls the `ui` QVM module |
+| `snd_*.c` | Software mixer and ADPCM codec |
+| `cin_*.c` | RoQ video cinematic playback |
+
+### `code/server/`
+
+The server subsystem manages game state, clients, and snapshot generation.
+
+| File | Purpose |
+|---|---|
+| `sv_main.c` | Server initialisation (`SV_Init`), `SV_Frame`, map loading |
+| `sv_client.c` | Per-client connection state machine — challenge, connect, userinfo, disconnect |
+| `sv_game.c` | Loads and calls the `game` QVM module |
+| `sv_snapshot.c` | Builds per-client snapshots with delta compression and PVS culling |
+| `sv_ccmds.c` | Server-side console commands (`map`, `kick`, `status`, etc.) |
+| `sv_net_chan.c` | Server-side reliable channel |
+| `sv_bot.c` | Bot client management (allocate / free bot slots) |
+
+### `code/game/`
+
+Server-side game logic, compiled to `baseq3/vm/qagame.qvm`. Runs entirely inside the QVM.
+
+| File | Purpose |
+|---|---|
+| `g_public.h` | Public API — `gameImport_t` (engine→game traps) and `gameExport_t` (game entry points) |
+| `g_main.c` | `G_InitGame`, `G_RunFrame`, `G_ShutdownGame` |
+| `g_client.c` | Client connect / disconnect, userinfo changed |
+| `g_combat.c` | Damage, death, obituary |
+| `g_weapon.c` | Weapon firing and projectile logic |
+| `g_items.c` | Item pickup and respawn |
+| `bg_public.h` | Shared game definitions used by both game and cgame |
+| `bg_pmove.c` | Player movement (`PmoveSingle`) — shared code run on both client and server |
+| `bg_lib.c` | Replacement C standard library (used inside QVM where libc is unavailable) |
+
+### `code/cgame/`
+
+Client-side game code, compiled to `baseq3/vm/cgame.qvm`. Runs inside the QVM on the client.
+
+| File | Purpose |
+|---|---|
+| `cg_public.h` | Public API — `cgameImport_t` (engine→cgame traps) and `cgameExport_t` (cgame entry points), plus `snapshot_t` definition |
+| `cg_main.c` | `CG_Init`, `CG_Shutdown`, `CG_DrawActiveFrame` |
+| `cg_predict.c` | Client-side movement prediction using the shared `bg_pmove.c` |
+| `cg_ents.c` | Entity interpolation and rendering |
+| `cg_effects.c` | Particle and effect systems |
+| `cg_draw.c` | HUD rendering |
+| `cg_snapshot.c` | Snapshot transition, entity state management |
+
+### `code/q3_ui/`
+
+The main menu and in-game UI, compiled to `baseq3/vm/ui.qvm`. Runs inside the QVM.
+
+### `code/renderer/`
+
+OpenGL renderer, loaded as a dynamic module (DLL/SO) or compiled statically.
+
+| File | Purpose |
+|---|---|
+| `tr_public.h` | Public API — `refexport_t` (renderer exports) and `refimport_t` (engine functions available to renderer) |
+| `tr_main.c` | Frame setup, portal/mirror recursion |
+| `tr_shader.c` | Shader (material) parsing and management |
+| `tr_mesh.c` | MD3 model rendering |
+| `tr_world.c` | BSP world rendering and PVS traversal |
+| `tr_light.c` | Dynamic light interaction and lightmap management |
+| `tr_backend.c` | OpenGL draw call submission |
+| `tr_image.c` | Texture loading (TGA, JPEG, PCX) and upload |
+
+### `code/botlib/`
+
+The bot AI library (AAS — Area Awareness System). Provides pathfinding, goal selection, and chat AI for computer-controlled players.
+
+### `code/bspc/`
+
+Bot route compiler source. Processes `.bsp` files to generate `.aas` files used by botlib.
+
+### `code/ui/`
+
+Alternate UI code (Team Arena). Shares some sources with `q3_ui/`.
+
+### `code/unix/`
+
+Unix/Linux platform abstraction layer — window creation (GLX), input (X11), dynamic library loading, filesystem paths, and the `cons` build script (`Construct`).
+
+### `code/win32/`
+
+Windows platform abstraction layer — Win32 window/OpenGL initialisation, DirectInput, `Sys_LoadDll`.
+
+### `code/macosx/`
+
+macOS platform layer — Xcode project (`Quake3.pbproj`), AGL OpenGL setup, Mac-specific input.
+
+### `code/null/`
+
+Stub implementations for client-side subsystems used when compiling a dedicated server (`DEDICATED` define). Provides no-op versions of rendering, sound, and input functions.
+
+### `code/jpeg-6/`
+
+Bundled IJG JPEG library (release 6), used by the renderer to load JPEG textures.
+
+---
+
+## `lcc/` — C Compiler
+
+A fork of the LCC retargetable C compiler. Used to compile `code/game/`, `code/cgame/`, and `code/q3_ui/` C sources into QVM assembly (`.asm` files). The QVM backend is in `lcc/src/q3a.md` / `lcc/src/q3a.c`.
+
+Pre-built binaries (`lcc.exe`, `q3cpp.exe`, `q3rcc.exe`) are in `lcc/bin/`.
+
+---
+
+## `q3asm/` — QVM Assembler
+
+Takes the `.asm` output from `lcc` and produces `.qvm` bytecode files. The assembler also links multiple translation units into a single QVM image and produces a `.map` file of symbol→instruction-number mappings used by the VM debugger.
+
+---
+
+## `q3map/` — Map Compiler
+
+Converts `.map` text files (brush geometry + entity definitions) into binary `.bsp` files. This is the version that shipped with Q3Radiant 200f.
+
+---
+
+## `q3radiant/` — Map Editor
+
+Q3Radiant build 200f. A Windows-only map editor built on the GTK-Radiant lineage. The Visual Studio solution is at `q3radiant/Radiant.sln`.
+
+---
+
+## `common/` and `libs/`
+
+Shared support code and third-party libraries used by `q3radiant` and `q3map`. Includes pak file reading (`libs/pak/`), an alternative JPEG implementation (`libs/jpeg6/`), and the MD4 checksum implementation (`common/md4.c`).

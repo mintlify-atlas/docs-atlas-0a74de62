@@ -1,0 +1,378 @@
+---
+title: "Console commands reference"
+description: "Reference for Quake III Arena server and client console commands. Covers map loading, player management, demo recording, chat, and voting."
+---
+
+Console commands are typed at the `~` console or passed on the command line with `+`. This reference covers commands registered in `code/server/sv_ccmds.c` (server operator commands) and `code/client/cl_main.c` (client commands), as well as game-module commands handled through `GAME_CONSOLE_COMMAND` and `GAME_CLIENT_COMMAND`.
+
+## Server commands
+
+These commands are registered by `SV_AddOperatorCommands` in `sv_ccmds.c`. They are available on a dedicated server console or to the host of a listen server.
+
+<AccordionGroup>
+  <Accordion title="map &lt;mapname&gt;">
+    Load a map and start a new server on it. Cheats are disabled.
+
+    ```bash
+    map q3dm17
+    map q3tourney2
+    ```
+
+    The engine looks for `maps/<mapname>.bsp` in the game path. If the file does not exist, the command is rejected and the current map remains running.
+
+    **Source**: `SV_Map_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="devmap &lt;mapname&gt;">
+    Load a map with cheats enabled (`sv_cheats 1`). All cheat-protected CVars become writeable.
+
+    ```bash
+    devmap q3dm1
+    ```
+
+    **Source**: `SV_Map_f` in `sv_ccmds.c` (same function, checks command name)
+  </Accordion>
+
+  <Accordion title="map_restart [delay]">
+    Restart the current map without sending a new gamestate to clients. This allows fair restarts without the level-load screen. An optional delay in seconds is honored if `g_doWarmup` is set.
+
+    ```bash
+    map_restart
+    map_restart 5
+    ```
+
+    **Source**: `SV_MapRestart_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="kick &lt;playername&gt;">
+    Disconnect a player by name. Use `kick all` to kick all non-local players, or `kick allbots` to remove bots only.
+
+    ```bash
+    kick Sarge
+    kick all
+    kick allbots
+    ```
+
+    **Source**: `SV_Kick_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="clientkick &lt;clientnum&gt;">
+    Disconnect a player by their slot number (0 to `sv_maxclients-1`).
+
+    ```bash
+    clientkick 3
+    ```
+
+    **Source**: `SV_KickNum_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="status">
+    Print the current server status: map name, and a table of connected clients showing slot number, score, ping, name, address, and rate.
+
+    ```bash
+    status
+    ```
+
+    **Source**: `SV_Status_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="serverinfo">
+    Print all CVars flagged `CVAR_SERVERINFO` as an info string. This is the same information returned by server browser queries.
+
+    ```bash
+    serverinfo
+    ```
+
+    **Source**: `SV_Serverinfo_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="systeminfo">
+    Print all CVars flagged `CVAR_SYSTEMINFO`. These are broadcast to and respected by all connected clients.
+
+    ```bash
+    systeminfo
+    ```
+
+    **Source**: `SV_Systeminfo_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="dumpuser &lt;playername&gt;">
+    Print all userinfo key-value pairs for a connected client (name, model, handicap, etc.).
+
+    ```bash
+    dumpuser Sarge
+    ```
+
+    **Source**: `SV_DumpUser_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="killserver">
+    Shut down the server cleanly.
+
+    ```bash
+    killserver
+    ```
+
+    **Source**: `SV_KillServer_f` in `sv_ccmds.c`
+  </Accordion>
+
+  <Accordion title="say &lt;text&gt; (dedicated server only)">
+    Broadcast a chat message from the server console to all clients, prefixed with `console:`.
+
+    ```bash
+    say Server restarting in 60 seconds!
+    ```
+
+    **Source**: `SV_ConSay_f` in `sv_ccmds.c` (registered only when `dedicated` is set)
+  </Accordion>
+
+  <Accordion title="heartbeat">
+    Force an immediate heartbeat packet to the master server (normally sent automatically).
+
+    **Source**: `SV_Heartbeat_f` in `sv_ccmds.c`
+  </Accordion>
+</AccordionGroup>
+
+## Game module server commands
+
+These commands are handled by `ConsoleCommand()` in `code/game/g_svcmds.c` via the `GAME_CONSOLE_COMMAND` callback:
+
+<AccordionGroup>
+  <Accordion title="addbot &lt;botname&gt; &lt;skill&gt; [team] [delay] [altname]">
+    Add a bot to the server. `skill` ranges from 1 (easiest) to 5 (hardest). `team` can be `red` or `blue` in team modes.
+
+    ```bash
+    addbot Sarge 3
+    addbot Keel 5 red
+    ```
+
+    **Source**: `Svcmd_AddBot_f` in `code/game/g_svcmds.c`
+  </Accordion>
+
+  <Accordion title="botlist">
+    List all available bot characters.
+
+    **Source**: `Svcmd_BotList_f` in `code/game/g_svcmds.c`
+  </Accordion>
+
+  <Accordion title="entitylist">
+    Print a list of all active entities and their classnames. Equivalent to setting `g_listEntity 1`.
+
+    **Source**: `Svcmd_EntityList_f` in `code/game/g_svcmds.c`
+  </Accordion>
+</AccordionGroup>
+
+## Client commands
+
+These commands are registered by `CL_InitCommands` in `code/client/cl_main.c`:
+
+<AccordionGroup>
+  <Accordion title="connect &lt;address&gt;">
+    Connect to a server at the given address. Accepts `host:port` or just `host` (defaults to port 27960).
+
+    ```bash
+    connect 192.168.1.10
+    connect 192.168.1.10:27960
+    connect myserver.example.com
+    ```
+
+    **Source**: `CL_Connect_f` in `cl_main.c`
+  </Accordion>
+
+  <Accordion title="reconnect">
+    Reconnect to the last server you were connected to.
+
+    ```bash
+    reconnect
+    ```
+
+    **Source**: `CL_Reconnect_f` in `cl_main.c`
+  </Accordion>
+
+  <Accordion title="disconnect">
+    Disconnect from the current server.
+
+    ```bash
+    disconnect
+    ```
+
+    **Source**: `CL_Disconnect_f` in `cl_main.c`
+  </Accordion>
+
+  <Accordion title="record [demoname]">
+    Begin recording a demo to `demos/<demoname>.dm_68`. If no name is given, a timestamp-based name is used.
+
+    ```bash
+    record myfrag
+    record
+    ```
+
+    **Source**: `CL_Record_f` in `cl_main.c`
+  </Accordion>
+
+  <Accordion title="stoprecord">
+    Stop recording the current demo.
+
+    ```bash
+    stoprecord
+    ```
+
+    **Source**: `CL_StopRecord_f` in `cl_main.c`
+  </Accordion>
+
+  <Accordion title="demo &lt;demoname&gt;">
+    Play back a recorded demo file from the `demos/` directory.
+
+    ```bash
+    demo myfrag
+    ```
+
+    **Source**: `CL_PlayDemo_f` in `cl_main.c`
+  </Accordion>
+
+  <Accordion title="screenshot">
+    Take a TGA screenshot. The file is saved to the current mod directory as `screenshots/shot####.tga`.
+
+    ```bash
+    screenshot
+    ```
+
+    `screenshotJPEG` saves a JPEG instead.
+
+    **Source**: `R_ScreenShot_f` in `code/renderer/tr_init.c`
+  </Accordion>
+
+  <Accordion title="vid_restart">
+    Restart the renderer with the current video settings (resolution, fullscreen, etc.).
+
+    ```bash
+    vid_restart
+    ```
+
+    **Source**: `CL_Vid_Restart_f` in `cl_main.c`
+  </Accordion>
+
+  <Accordion title="snd_restart">
+    Restart the sound system.
+
+    ```bash
+    snd_restart
+    ```
+
+    **Source**: `CL_Snd_Restart_f` in `cl_main.c`
+  </Accordion>
+
+  <Accordion title="model &lt;model/skin&gt;">
+    Change your player model. Accepts `modelname/skinname`.
+
+    ```bash
+    model sarge/default
+    model keel/red
+    ```
+
+    **Source**: `CL_SetModel_f` in `cl_main.c`
+  </Accordion>
+</AccordionGroup>
+
+## In-game client commands
+
+These commands are sent to the server and handled by `ClientCommand` in `code/game/g_cmds.c`:
+
+<AccordionGroup>
+  <Accordion title="say &lt;text&gt;">
+    Send a chat message to all players.
+
+    ```bash
+    say good game everyone
+    ```
+
+    **Source**: `Cmd_Say_f` in `code/game/g_cmds.c`
+  </Accordion>
+
+  <Accordion title="say_team &lt;text&gt;">
+    Send a message only to teammates.
+
+    ```bash
+    say_team flag is dropped at base
+    ```
+  </Accordion>
+
+  <Accordion title="tell &lt;clientnum&gt; &lt;text&gt;">
+    Send a private message to a specific player.
+
+    ```bash
+    tell 3 nice shot
+    ```
+  </Accordion>
+
+  <Accordion title="callvote &lt;command&gt;">
+    Initiate a vote. All connected non-bot clients can vote `yes` or `no`. Requires `g_allowVote 1`.
+
+    ```bash
+    callvote map q3dm17
+    callvote fraglimit 30
+    callvote kick Sarge
+    ```
+
+    **Source**: `Cmd_CallVote_f` in `code/game/g_cmds.c`
+  </Accordion>
+
+  <Accordion title="vote &lt;yes|no&gt;">
+    Cast a vote on the current active vote.
+
+    ```bash
+    vote yes
+    vote no
+    ```
+
+    **Source**: `Cmd_Vote_f` in `code/game/g_cmds.c`
+  </Accordion>
+
+  <Accordion title="kill">
+    Kill yourself (suicide). Useful for testing respawn logic.
+
+    ```bash
+    kill
+    ```
+  </Accordion>
+
+  <Accordion title="team &lt;r|b|s|f&gt;">
+    Join a team: `r` = red, `b` = blue, `s` = spectator, `f` = free (FFA).
+
+    ```bash
+    team r
+    team s
+    ```
+  </Accordion>
+
+  <Accordion title="follow &lt;clientnum&gt;">
+    As a spectator, follow a specific player.
+
+    ```bash
+    follow 2
+    ```
+  </Accordion>
+
+  <Accordion title="where">
+    Print your current position in the world. Useful for map development.
+
+    ```bash
+    where
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common utility commands
+
+| Command | Description |
+|---|---|
+| `exec <filename>` | Execute a `.cfg` script file |
+| `vstr <cvarname>` | Execute the contents of a CVar as a command |
+| `echo <text>` | Print text to the console |
+| `wait [frames]` | Pause command buffer execution for N frames |
+| `cmdlist` | List all registered commands |
+| `cvarlist` | List all CVars with their current values |
+| `set <name> <value>` | Set a CVar |
+| `seta <name> <value>` | Set a CVar with `CVAR_ARCHIVE` |
+| `toggle <cvar>` | Toggle a CVar between 0 and 1 |
+| `quit` | Exit the game |

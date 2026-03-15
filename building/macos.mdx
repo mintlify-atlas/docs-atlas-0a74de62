@@ -1,0 +1,101 @@
+---
+title: Building on macOS
+description: How to compile Quake III Arena on macOS using the Xcode / Project Builder project file included in the source release.
+---
+
+## Requirements
+
+| Requirement | Notes |
+|-------------|-------|
+| **macOS** (OS X) | The project was written for early OS X (10.1–10.2 era) |
+| **Project Builder** or **Xcode** | Apple's IDE. `Quake3.pbproj` is the older Project Builder format, supported by early Xcode versions |
+
+---
+
+## Project file
+
+The Xcode / Project Builder project is located at:
+
+```
+code/macosx/Quake3.pbproj
+```
+
+This is a directory (`.pbproj` bundle) containing:
+
+| File | Description |
+|------|-------------|
+| `project.pbxproj` | Main project specification (build phases, targets, file references) |
+| `apple.pbxuser` | Per-user project settings |
+
+---
+
+## macOS-specific source files
+
+The `code/macosx/` directory contains the Objective-C and macOS-specific platform layer:
+
+| File | Purpose |
+|------|---------|
+| `Q3Controller.m` / `.h` | Cocoa application controller (NSApplication delegate) |
+| `macosx_display.m` / `.h` | Display mode enumeration and fullscreen switching |
+| `macosx_glimp.m` / `.h` | OpenGL context creation (AGL) and window management |
+| `macosx_glsmp_mutex.m` | Multi-threaded OpenGL context synchronisation (mutex variant) |
+| `macosx_glsmp_null.m` | Single-threaded OpenGL context stub |
+| `CGMouseDeltaFix.m` / `.h` | CoreGraphics mouse delta workaround |
+| `CGPrivateAPI.h` | Private CoreGraphics API declarations used for raw mouse input |
+| `GenerateQGL.pl` | Perl script that generates the OpenGL function-pointer table (`QGL.H`) |
+
+---
+
+## Building
+
+<Steps>
+  <Step title="Open the project">
+    Double-click `code/macosx/Quake3.pbproj` to open it in Project Builder or Xcode.
+  </Step>
+  <Step title="Select a target">
+    The project contains a target that builds the `Quake3.app` bundle. Select it in the Targets pane.
+  </Step>
+  <Step title="Build">
+    Press **Cmd+B** (Build). Project Builder / Xcode compiles the engine sources, the Objective-C platform layer, and links everything into an application bundle.
+  </Step>
+</Steps>
+
+---
+
+## Application bundle structure
+
+The build produces a standard macOS application bundle:
+
+```
+Quake3.app/
+└── Contents/
+    ├── MacOS/
+    │   └── Quake3          # Mach-O executable
+    ├── Resources/
+    │   └── Quake3.icns     # Application icon
+    └── Info.plist
+```
+
+---
+
+## QVM modules on macOS
+
+QVM modules are platform-neutral and do not need to be compiled separately for macOS. Copy the `.qvm` files built on any platform into `baseq3/vm/` inside the application bundle's `Contents/Resources/` or alongside it depending on how your installation is structured.
+
+<Note>
+Precompiled Windows LCC binaries are in `lcc/bin/`. To build QVM modules on macOS you would need to compile lcc and q3asm from source for the macOS target — this is not covered by the included build files.
+</Note>
+
+---
+
+## Known limitations
+
+<Warning>
+The macOS build targets early OS X (circa 10.1–10.2) and uses APIs that have since been deprecated or removed:
+
+- **AGL** (Apple OpenGL) — replaced by `NSOpenGLView` / Metal.
+- **`CGPrivateAPI.h`** — relies on undocumented CoreGraphics symbols.
+- **Project Builder format** — `.pbproj` projects require an older Xcode version (Xcode 2.x or earlier) to open natively; newer Xcode can import them with reduced fidelity.
+
+Community ports exist that update the macOS platform layer for modern OS X / macOS.
+</Warning>

@@ -1,0 +1,148 @@
+---
+title: 'Sound system'
+description: 'The sound API from snd_public.h, sound registration, spatial attenuation, DMA mixing, ADPCM and wavelet compression, and CD audio.'
+---
+
+The sound system is implemented across several files: `client/snd_main.c` (dispatch), `client/snd_dma.c` (DMA mixing), `client/snd_adpcm.c` (ADPCM decompression), and `client/snd_wavelet.c` (wavelet decompression). The public API is declared in `client/snd_public.h`.
+
+## Initialization and shutdown
+
+```c
+void S_Init( void );      // Initialize the sound system and open the audio device
+void S_Shutdown( void );  // Release all sound resources
+```
+
+`S_Init` opens the platform DMA device (or OpenAL on supported builds), allocates the mixing buffer, and registers sound CVars. If the device cannot be opened, the sound system silently disables itself.
+
+## Sound registration
+
+```c
+sfxHandle_t S_RegisterSound( const char *sample, qboolean compressed );
+```
+
+All sounds must be registered before they are played. `S_RegisterSound` returns a non-zero `sfxHandle_t` even if the file is not found — the engine creates a placeholder (a short buzz) to prevent repeated filesystem checks during gameplay.
+
+The `compressed` flag selects the decompression path:
+
+| Value | Path |
+|---|---|
+| `qfalse` | Raw PCM or ADPCM |
+| `qtrue` | Wavelet-compressed (`.wav` with Q3 wavelet header) |
+
+## Playing sounds
+
+### World-positioned sounds
+
+```c
+void S_StartSound( vec3_t origin, int entnum, int entchannel, sfxHandle_t sfx );
+```
+
+If `origin` is `NULL`, the sound is dynamically sourced from the entity identified by `entnum`. Volume and stereo panning are computed each mix frame based on the distance and angle from the listener.
+
+Channels allow multiple sounds per entity:
+
+| Channel | Description |
+|---|---|
+| `CHAN_AUTO` | Automatically select a free channel |
+| `CHAN_LOCAL` | Not spatialized; full-volume (UI sounds) |
+| `CHAN_WEAPON` | Weapon fire (stops previous weapon sound) |
+| `CHAN_VOICE` | Player voice (taunts, pain, death) |
+| `CHAN_ITEM` | Item pickup and activation |
+| `CHAN_BODY` | Footsteps, landing |
+| `CHAN_ANNOUNCER` | Announcer voice (full-volume, unspatialized) |
+
+### Local sounds
+
+```c
+void S_StartLocalSound( sfxHandle_t sfx, int channelNum );
+```
+
+Local sounds play at full volume without attenuation, used for UI feedback and announcer cues.
+
+### Stopping sounds
+
+```c
+void S_StopAllSounds( void );           // Stop everything immediately
+void S_StopLoopingSound( int entityNum ); // Stop a looping sound on an entity
+void S_ClearLoopingSounds( qboolean killall ); // Clear per-entity looping sounds
+```
+
+## Spatial audio
+
+The listener position and orientation are updated once per frame by cgame:
+
+```c
+void S_Respatialize( int entityNum, const vec3_t origin,
+                     vec3_t axis[3], int inwater );
+```
+
+Attenuation is computed with a simple distance model: full volume within a reference radius, then rolling off linearly to the maximum audible distance. Underwater sounds (`inwater = 1`) are low-pass filtered by resampling them at a lower effective rate.
+
+Moving entities have their sound origin updated each frame:
+
+```c
+void S_UpdateEntityPosition( int entityNum, const vec3_t origin );
+```
+
+## Looping sounds
+
+Continuous sounds (fans, ambient environment, flight powerup) are submitted as looping sounds each frame. The sound system automatically stops them when they are no longer submitted:
+
+```c
+void S_AddLoopingSound( int entityNum, const vec3_t origin,
+                        const vec3_t velocity, sfxHandle_t sfx );
+void S_AddRealLoopingSound( int entityNum, const vec3_t origin,
+                             const vec3_t velocity, sfxHandle_t sfx );
+```
+
+The difference between the two: `S_AddLoopingSound` respects the maximum audible distance; `S_AddRealLoopingSound` is always audible regardless of distance.
+
+## DMA mixing (`snd_dma.c`)
+
+The DMA path writes directly into a hardware-mapped circular buffer. `S_Update` is called once per frame and mixes all active channels into the DMA buffer:
+
+1. Calculate the listener-relative volume and pan for each active channel.
+2. Mix each channel's decoded PCM samples into the output buffer.
+3. Handle buffer wraparound.
+
+Key CVars controlling DMA behavior:
+
+| CVar | Default | Description |
+|---|---|---|
+| `s_volume` | `0.8` | Master sound volume (0.0 – 1.0) |
+| `s_musicvolume` | `0.25` | Background music volume |
+| `s_mixahead` | `0.2` | Seconds of sound to mix ahead |
+| `s_khz` | `22` | Mixing rate in kHz (11, 22, or 44) |
+
+## ADPCM compression (`snd_adpcm.c`)
+
+ADPCM (Adaptive Differential Pulse Code Modulation) is a 4-bit per sample format that achieves 4:1 compression over 16-bit PCM. The engine decodes ADPCM samples on the fly during mixing. Most ambient and weapon sounds in the base game are stored as ADPCM.
+
+## Wavelet decompression (`snd_wavelet.c`)
+
+Long, high-quality sounds (voice lines, music stings) can be stored with a custom wavelet codec applied during asset building. Sounds registered with `compressed = qtrue` pass through `S_WaveletDecompress` before being placed in the sound cache.
+
+## Background music and CD audio
+
+```c
+void S_StartBackgroundTrack( const char *intro, const char *loop );
+void S_StopBackgroundTrack( void );
+void S_UpdateBackgroundTrack( void );
+```
+
+`intro` plays once; `loop` repeats indefinitely after the intro finishes. The cgame module starts the background track during `CG_Init` by reading the `CS_MUSIC` configstring:
+
+```c
+void CG_StartMusic( void ) {
+    s = (char *)CG_ConfigString( CS_MUSIC );
+    Q_strncpyz( parm1, COM_Parse( &s ), sizeof(parm1) ); // intro track
+    Q_strncpyz( parm2, COM_Parse( &s ), sizeof(parm2) ); // loop track
+    trap_S_StartBackgroundTrack( parm1, parm2 );
+}
+```
+
+Music is streamed from `.ogg` or `.wav` files. On platforms that support it, raw CD audio can also be played through the background track API by passing a track number string (e.g., `"cdtrack 2"`).
+
+<Note>
+Passing an empty string for the `loop` parameter to `S_StartBackgroundTrack` stops background music after the intro finishes. Passing an empty `intro` stops music immediately.
+</Note>

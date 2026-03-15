@@ -1,0 +1,163 @@
+---
+title: Renderer Overview
+description: Architecture and frame lifecycle of the Quake III Arena software renderer, built on OpenGL's legacy fixed-function pipeline.
+---
+
+The Quake III Arena renderer is a self-contained shared library (or statically linked module) that communicates with the rest of the engine through two versioned function-table structs: `refexport_t` and `refimport_t`. The renderer never directly calls engine code; it only calls back through the import table supplied at startup.
+
+## Module boundary
+
+The renderer is initialised by calling the single exported symbol:
+
+```c
+refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp );
+```
+
+If the renderer cannot reach a valid OpenGL state it returns `NULL`. The current API version is defined as `REF_API_VERSION 8`.
+
+### `refexport_t` — functions the engine calls
+
+Defined in `renderer/tr_public.h`. Key members:
+
+```c
+typedef struct {
+    void    (*Shutdown)( qboolean destroyWindow );
+
+    // Asset registration
+    void      (*BeginRegistration)( glconfig_t *config );
+    qhandle_t (*RegisterModel)( const char *name );
+    qhandle_t (*RegisterSkin)( const char *name );
+    qhandle_t (*RegisterShader)( const char *name );
+    qhandle_t (*RegisterShaderNoMip)( const char *name );
+    void      (*LoadWorld)( const char *name );
+    void      (*SetWorldVisData)( const byte *vis );
+    void      (*EndRegistration)( void );
+
+    // Scene building
+    void  (*ClearScene)( void );
+    void  (*AddRefEntityToScene)( const refEntity_t *re );
+    void  (*AddPolyToScene)( qhandle_t hShader, int numVerts,
+                             const polyVert_t *verts, int num );
+    int   (*LightForPoint)( vec3_t point, vec3_t ambientLight,
+                            vec3_t directedLight, vec3_t lightDir );
+    void  (*AddLightToScene)( const vec3_t org, float intensity,
+                              float r, float g, float b );
+    void  (*RenderScene)( const refdef_t *fd );
+
+    // 2D drawing
+    void  (*SetColor)( const float *rgba );
+    void  (*DrawStretchPic)( float x, float y, float w, float h,
+                             float s1, float t1, float s2, float t2,
+                             qhandle_t hShader );
+
+    // Frame control
+    void  (*BeginFrame)( stereoFrame_t stereoFrame );
+    void  (*EndFrame)( int *frontEndMsec, int *backEndMsec );
+
+    // Utilities
+    int   (*LerpTag)( orientation_t *tag, qhandle_t model,
+                      int startFrame, int endFrame,
+                      float frac, const char *tagName );
+    void  (*ModelBounds)( qhandle_t model, vec3_t mins, vec3_t maxs );
+    qboolean (*inPVS)( const vec3_t p1, const vec3_t p2 );
+} refexport_t;
+```
+
+### `refimport_t` — services the renderer uses
+
+Also in `tr_public.h`. The renderer calls back through this table for printing, memory allocation (`Hunk_Alloc`), cvar access, filesystem reads, and cinematic playback. This keeps the renderer independent of the engine's internal symbols.
+
+## OpenGL usage
+
+Q3A targets the legacy OpenGL fixed-function pipeline (OpenGL 1.1–1.4). The renderer uses:
+
+- `glBegin` / `glEnd` immediate mode for most drawing
+- `GL_ARB_multitexture` (when available) for lightmapped multi-texture in a single pass
+- Compiled vertex arrays (`GL_EXT_compiled_vertex_array`) for performance
+- Hardware gamma ramps via `GLimp_SetGamma`
+
+Renderer cvars that control GL usage include `r_ext_multitexture`, `r_ext_compiled_vertex_array`, `r_primitives`, and `r_allowExtensions`.
+
+<Note>
+The renderer does not use GLSL shaders. Q3A "shaders" are text scripts that drive the fixed-function pipeline through multi-pass rendering. See [Shaders](/engine/renderer/shaders) for details.
+</Note>
+
+## Scene-based API
+
+Each visible 3D view is built with a three-step protocol:
+
+<Steps>
+  <Step title="ClearScene">
+    `RE_ClearScene()` resets the entity, dynamic light, and polygon lists for the current scene.
+  </Step>
+  <Step title="Populate the scene">
+    The client game calls any combination of:
+    - `RE_AddRefEntityToScene( const refEntity_t *re )` — models, sprites, beams, portals
+    - `RE_AddPolyToScene( hShader, numVerts, verts, num )` — raw polygons with a shader
+    - `RE_AddLightToScene( org, intensity, r, g, b )` — dynamic omni lights (up to `MAX_DLIGHTS 32`)
+  </Step>
+  <Step title="RenderScene">
+    `RE_RenderScene( const refdef_t *fd )` submits the scene. The `refdef_t` carries viewport dimensions, field of view, view origin and axes, current time, and the area mask used to cull PVS areas.
+  </Step>
+</Steps>
+
+## Key render path
+
+Once `RenderScene` is called the front end performs the following sequence:
+
+```
+R_RenderView()
+  └─ R_AddWorldSurfaces()       // BSP traversal, PVS cull, frustum cull
+  └─ R_AddEntitySurfaces()      // MD3 / MD4 / brush models per entity
+  └─ R_AddPolygonSurfaces()     // raw polys from cgame
+  └─ R_SortDrawSurfs()          // qsort by packed sort key
+  └─ RB_ExecuteRenderCommands() // back end: opaque → sky → transparent → flares → 2D
+```
+
+Surfaces are sorted by a packed 32-bit key that encodes shader index, entity index, fog index, and dynamic-light map index. This minimises OpenGL state changes.
+
+### Surface render order
+
+| Phase | `shaderSort_t` values |
+|---|---|
+| Portals and mirrors | `SS_PORTAL` |
+| Sky box | `SS_ENVIRONMENT` |
+| Opaque world | `SS_OPAQUE` |
+| Decals / scorch marks | `SS_DECAL` |
+| See-through (grates) | `SS_SEE_THROUGH` |
+| Banners | `SS_BANNER` |
+| Fog | `SS_FOG` |
+| Underwater | `SS_UNDERWATER` |
+| Additive/blend effects | `SS_BLEND0` … `SS_BLEND6` |
+| Particles (nearest) | `SS_NEAREST` |
+
+## Frame lifecycle
+
+<Steps>
+  <Step title="BeginFrame">
+    `RE_BeginFrame( stereoFrame )` toggles the SMP double-buffer frame index, clears the command list, and issues a `RC_DRAW_BUFFER` command.
+  </Step>
+  <Step title="Scene building">
+    The client game calls `ClearScene`, populates entities and lights, then calls `RenderScene` one or more times (main view, then any in-scene 3D HUD icons). Each call appends a `RC_DRAW_SURFS` command to the back-end command list.
+  </Step>
+  <Step title="2D overlay">
+    The client game calls `DrawStretchPic` for HUD elements. These append `RC_STRETCH_PIC` commands.
+  </Step>
+  <Step title="EndFrame">
+    `RE_EndFrame( &frontEndMsec, &backEndMsec )` appends `RC_SWAP_BUFFERS` and wakes the render thread (on SMP builds) or processes all commands inline. Timing data is returned to the caller.
+  </Step>
+</Steps>
+
+## Symmetric multi-processing (SMP)
+
+The renderer supports a dual-CPU mode (`r_smp 1`) where the back end runs on a dedicated render thread. The `backEndData_t` structure — containing draw surface lists, entity arrays, and the command buffer — is double-buffered (`SMP_FRAMES 2`) so the front end can build the next frame while the back end flushes the current one.
+
+## Key internal globals
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `tr` | `trGlobals_t` | All front-end state: world, shaders, models, images |
+| `backEnd` | `backEndState_t` | Current back-end state and performance counters |
+| `glConfig` | `glconfig_t` | Hardware capabilities reported at init |
+| `glState` | `glstate_t` | Cached OpenGL state to avoid redundant calls |
+| `tess` | `shaderCommands_t` | The tesselator buffer passed between front and back end |

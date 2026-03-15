@@ -1,0 +1,207 @@
+---
+title: 'Effects and particles'
+description: 'Visual effects in cg_effects.c, the particle system in cg_particles.c, decal marks, local entities, and weapon trail functions.'
+---
+
+Client-side visual effects are split across four source files: `cg_effects.c` (explosions, blood, gibs), `cg_particles.c` (weather and environment particles), `cg_marks.c` (decals), and `cg_localents.c` (shell casings, gibs, score plums). All of these systems are **client-side only** — they have no server authority and are purely cosmetic.
+
+## Local entities
+
+A **local entity** (`localEntity_t`, defined in `cg_local.h`) is an autonomous visual object that is not tracked by the server. It has a start time, an end time, a trajectory, and an embedded `refEntity_t` that is submitted to the renderer each frame by `CG_AddLocalEntities`.
+
+```c
+typedef struct localEntity_s {
+    struct localEntity_s *prev, *next;
+    leType_t    leType;       // LE_EXPLOSION, LE_FRAGMENT, LE_MOVE_SCALE_FADE, ...
+    int         leFlags;      // LEF_PUFF_DONT_SCALE, LEF_TUMBLE, ...
+    int         startTime;
+    int         endTime;
+    float       lifeRate;     // 1.0 / (endTime - startTime)
+    trajectory_t pos;
+    trajectory_t angles;
+    float       bounceFactor; // 0 = no bounce
+    float       color[4];
+    leMarkType_t      leMarkType;       // mark left on impact
+    leBounceSoundType_t leBounceSoundType;
+    refEntity_t refEntity;
+} localEntity_t;
+```
+
+Local entity types (`leType_t`):
+
+| Type | Description |
+|---|---|
+| `LE_EXPLOSION` | Explosion model, fades over `msec` |
+| `LE_SPRITE_EXPLOSION` | Billboard explosion sprite |
+| `LE_FRAGMENT` | Gib or debris with gravity and bounce |
+| `LE_MOVE_SCALE_FADE` | Smoke puff: moves, scales up, fades out |
+| `LE_FALL_SCALE_FADE` | Falls and fades (used for sparks) |
+| `LE_SCOREPLUM` | Floating score number over the player |
+| `LE_FADE_RGB` | Color-fading overlay (teleport flash) |
+
+## Visual effects (`cg_effects.c`)
+
+### Smoke puffs
+
+```c
+localEntity_t *CG_SmokePuff( const vec3_t p, const vec3_t vel,
+                              float radius,
+                              float r, float g, float b, float a,
+                              float duration, int startTime,
+                              int fadeInTime, int leFlags,
+                              qhandle_t hShader );
+```
+
+Creates a single `LE_MOVE_SCALE_FADE` sprite. Used for rocket exhaust, shotgun puffs, and teleport trails.
+
+### Explosions
+
+```c
+localEntity_t *CG_MakeExplosion( vec3_t origin, vec3_t dir,
+                                  qhandle_t hModel, qhandle_t shader,
+                                  int msec, qboolean isSprite );
+```
+
+Spawns either a model-based (`LE_EXPLOSION`) or sprite-based (`LE_SPRITE_EXPLOSION`) explosion. A small random time offset prevents synchronized explosions when multiple projectiles hit simultaneously.
+
+### Blood and gibs
+
+```c
+void CG_Bleed( vec3_t origin, int entityNum );
+void CG_GibPlayer( vec3_t playerOrigin );
+void CG_BigExplode( vec3_t playerOrigin );
+```
+
+`CG_Bleed` spawns a blood-sprite `LE_EXPLOSION`. `CG_GibPlayer` launches up to ten gib model fragments (`cgs.media.gibSkull`, `gibArm`, `gibChest`, etc.) as `LE_FRAGMENT` entities with `TR_GRAVITY` trajectories and `LEBS_BLOOD` bounce sounds. Both functions check `cg_blood` before spawning anything.
+
+### Teleport effect
+
+```c
+void CG_SpawnEffect( vec3_t org );
+```
+
+Spawns a short `LE_FADE_RGB` overlay using `cgs.media.teleportEffectModel`.
+
+### Bubble trail
+
+```c
+void CG_BubbleTrail( vec3_t start, vec3_t end, float spacing );
+```
+
+Spawns a series of `LE_MOVE_SCALE_FADE` water bubble sprites along a line, used for projectiles fired underwater.
+
+### Score plum
+
+```c
+void CG_ScorePlum( int client, vec3_t org, int score );
+```
+
+Floats a score number (`LE_SCOREPLUM`) above the player for 4 seconds. Only rendered for the local client if `cg_scorePlums` is enabled.
+
+## Particle system (`cg_particles.c`)
+
+The particle system is a separate, older system authored for environmental effects. It uses its own `cparticle_t` pool and is driven by `CG_AddParticles` each frame.
+
+```c
+typedef struct particle_s {
+    float     time, endtime;
+    vec3_t    org, vel, accel;
+    int       color;
+    float     alpha, alphavel;
+    int       type;        // particle_type_t
+    qhandle_t pshader;
+    float     height, width, endheight, endwidth;
+    qboolean  rotate;
+} cparticle_t;
+```
+
+Particle types (`particle_type_t`):
+
+| Type | Description |
+|---|---|
+| `P_WEATHER` | Snow or rain falling in a volume |
+| `P_WEATHER_TURBULENT` | Turbulent weather (wind) |
+| `P_WEATHER_FLURRY` | Snow flurry burst |
+| `P_SMOKE` | Rising smoke column |
+| `P_SMOKE_IMPACT` | Smoke burst on impact |
+| `P_BUBBLE` | Underwater bubble |
+| `P_BUBBLE_TURBULENT` | Turbulent bubble |
+| `P_BLEED` | Blood splatter |
+| `P_ANIM` | Animated shader sequence |
+| `P_FLAT` | Billboard sprite |
+| `P_ROTATE` | Rotating billboard |
+
+### Particle spawn functions
+
+```c
+void CG_ClearParticles( void );
+void CG_AddParticles( void );
+void CG_ParticleSnow( qhandle_t pshader, vec3_t origin, vec3_t origin2,
+                      int turb, float range, int snum );
+void CG_ParticleSmoke( qhandle_t pshader, centity_t *cent );
+void CG_ParticleBulletDebris( vec3_t org, vec3_t vel, int duration );
+void CG_ParticleSparks( vec3_t org, vec3_t vel, int duration,
+                        float x, float y, float speed );
+void CG_ParticleDust( centity_t *cent, vec3_t origin, vec3_t dir );
+void CG_ParticleExplosion( char *animStr, vec3_t origin, vec3_t vel,
+                           int duration, int sizeStart, int sizeEnd );
+```
+
+## Marks and decals (`cg_marks.c`)
+
+Marks are projected polygon decals placed on world geometry. They persist until the mark pool wraps around (`MAX_MARK_POLYS` = 256).
+
+```c
+void CG_ImpactMark( qhandle_t markShader,
+                    const vec3_t origin, const vec3_t dir,
+                    float orientation,
+                    float r, float g, float b, float a,
+                    qboolean alphaFade,
+                    float radius, qboolean temporary );
+void CG_InitMarkPolys( void );
+void CG_AddMarks( void );        // called each frame to submit active marks
+```
+
+The engine places each mark by calling `trap_CM_MarkFragments` to project the polygon onto world surfaces, then stores the result as a `markPoly_t` in a doubly-linked circular list. `cg_addMarks` (the `cg_marks` CVar) controls whether marks are spawned at all.
+
+Pre-registered mark shaders:
+
+| Shader handle | Visual |
+|---|---|
+| `bulletMarkShader` | Bullet hole |
+| `burnMarkShader` | Scorch mark (grenade, rocket) |
+| `holeMarkShader` | Large hole (lightning gun) |
+| `energyMarkShader` | Plasma hit mark |
+| `bloodMarkShader` | Blood splat |
+| `shadowMarkShader` | Player drop shadow |
+
+## Weapon effects
+
+Weapon trail and hit functions live in `cg_weapons.c` and call into the effects/particles subsystems.
+
+```c
+void CG_RailTrail( clientInfo_t *ci, vec3_t start, vec3_t end );
+void CG_GrappleTrail( centity_t *ent, const weaponInfo_t *wi );
+void CG_MissileHitWall( int weapon, int clientNum, vec3_t origin,
+                         vec3_t dir, impactSound_t soundType );
+void CG_MissileHitPlayer( int weapon, vec3_t origin, vec3_t dir, int entityNum );
+```
+
+<CardGroup cols={2}>
+  <Card title="Rail trail">
+    `CG_RailTrail` spawns both a core beam (`railCoreShader`) and rotating rings (`railRingsShader`) as local entities. Ring count and fade time are controlled by `cg_oldRail` and `cg_railTrailTime`.
+  </Card>
+  <Card title="Rocket trail">
+    The missile trail callback in `weaponInfo_t.missileTrailFunc` calls `CG_SmokePuff` at the missile's position each frame to build a smoke trail.
+  </Card>
+  <Card title="Plasma glow">
+    Plasma balls (`plasmaBallShader`) carry a dynamic light added via `trap_R_AddLightToScene` each frame.
+  </Card>
+  <Card title="Lightning beam">
+    The lightning gun beam is an `RT_LIGHTNING` ref entity submitted to the renderer, which draws it as a bolt between the gun tag and the impact point.
+  </Card>
+</CardGroup>
+
+<Tip>
+Set `cg_noProjectileTrail 1` to disable all projectile trails, which can improve performance on slow hardware.
+</Tip>

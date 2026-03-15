@@ -1,0 +1,146 @@
+---
+title: "CVars reference"
+description: "Complete reference for Quake III Arena game CVars. Includes all vmCvar_t declarations from g_main.c with defaults, flags, and descriptions."
+---
+
+This page documents all CVars registered by the game module (`qagame.qvm`) in `code/game/g_main.c`. CVars can be set on the server console, in `server.cfg`, or passed on the command line as `+set cvarname value`.
+
+## CVar flags
+
+| Flag | Value | Description |
+|---|---|---|
+| `CVAR_ARCHIVE` | `1` | Saved to `q3config.cfg` on exit |
+| `CVAR_USERINFO` | `2` | Sent to server in the userinfo string on connect or change |
+| `CVAR_SERVERINFO` | `4` | Included in the server info response visible to server browsers |
+| `CVAR_SYSTEMINFO` | `8` | Broadcast to all clients as system info |
+| `CVAR_LATCH` | `32` | Change takes effect only after the next map load |
+| `CVAR_ROM` | `64` | Read-only; cannot be set by users |
+| `CVAR_NORESTART` | `1024` | Preserved across `cvar_restart` |
+
+## Game CVars
+
+### Game type and match settings
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_gametype` | `0` | SERVERINFO, USERINFO, LATCH | Game type: 0=FFA, 1=Tournament, 2=Single Player, 3=Team DM, 4=CTF |
+| `fraglimit` | `20` | SERVERINFO, ARCHIVE, NORESTART | Number of frags to end the match. Announced to clients when changed. |
+| `timelimit` | `0` | SERVERINFO, ARCHIVE, NORESTART | Time limit in minutes. 0 = no time limit. Announced to clients when changed. |
+| `capturelimit` | `8` | SERVERINFO, ARCHIVE, NORESTART | Flag captures required to win CTF. Announced to clients when changed. |
+| `dmflags` | `0` | SERVERINFO, ARCHIVE | Bitmask of deathmatch flags. `8`=no falling damage, `16`=fixed FOV, `32`=no footsteps. Announced when changed. |
+
+### Client and server capacity
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `sv_maxclients` | `8` | SERVERINFO, LATCH, ARCHIVE | Maximum number of connected players. Takes effect on next map load. |
+| `g_maxGameClients` | `0` | SERVERINFO, LATCH, ARCHIVE | Maximum number of clients who can be in the game (non-spectating). 0 = no limit. |
+
+### Player movement and physics
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_speed` | `320` | (none) | Base player movement speed in units per second. Announced when changed. |
+| `g_gravity` | `800` | (none) | Gravity acceleration in units per second squared. Default matches `DEFAULT_GRAVITY` in `bg_public.h`. Announced when changed. |
+| `g_knockback` | `1000` | (none) | Knockback force multiplier applied on damage. Announced when changed. |
+
+### Weapons and items
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_weaponrespawn` | `5` | (none) | Weapon respawn time in seconds. Announced when changed. |
+| `g_weaponTeamRespawn` | `30` | (none) | Weapon respawn time in team game modes. |
+| `g_quadfactor` | `3` | (none) | Damage multiplier when carrying Quad Damage powerup. Announced when changed. |
+
+### Warmup
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_warmup` | `20` | ARCHIVE | Warmup countdown time in seconds before match start (Tournament and team modes). Announced when changed. |
+| `g_doWarmup` | `0` | (none) | Enable warmup phase. Announced when changed. |
+
+### Team play
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_friendlyFire` | `0` | ARCHIVE | Allow players to damage teammates. 0=off, 1=on. Announced when changed. |
+| `g_teamAutoJoin` | `0` | ARCHIVE | Automatically assign connecting players to teams. |
+| `g_teamForceBalance` | `0` | ARCHIVE | Force players to join the smaller team to maintain balance. |
+
+### Access control
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_password` | `""` | USERINFO | Server password. Set to require a password to connect. |
+| `g_needpass` | `0` | SERVERINFO, ROM | Automatically set to 1 when `g_password` is non-empty. Read-only. |
+| `g_banIPs` | `""` | ARCHIVE | Space-separated list of banned IP prefixes. |
+| `g_filterBan` | `1` | ARCHIVE | 1=deny IPs in `g_banIPs`, 0=only allow IPs in `g_banIPs`. |
+| `g_allowVote` | `1` | ARCHIVE | Allow clients to call votes (`callvote` command). |
+
+### Logging
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_log` | `"games.log"` | ARCHIVE | Filename for the game log. Events are appended each match. Empty string disables logging. |
+| `g_logSync` | `0` | ARCHIVE | 1=flush log to disk after every write (slower but safer on crash). |
+
+### Server information
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_motd` | `""` | (none) | Message of the day sent to connecting clients via `CS_MOTD` config string. |
+
+### Respawn and inactivity
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_forcerespawn` | `20` | (none) | Seconds after death before forcing respawn. 0=never. Announced when changed. |
+| `g_inactivity` | `0` | (none) | Seconds of no input before a player is kicked. 0=disabled. Announced when changed. |
+
+### Visuals
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `com_blood` | `1` | (none) | Enable blood effects. Mirrors the engine-level `com_blood` CVar. |
+
+### Debugging and development
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `g_debugMove` | `0` | (none) | Print movement trace info each frame. |
+| `g_debugDamage` | `0` | (none) | Print damage calculation info. |
+| `g_debugAlloc` | `0` | (none) | Print memory allocation info. |
+| `g_listEntity` | `0` | (none) | Print all entity classnames each frame, then reset to 0. |
+
+### Physics synchronization
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `pmove_fixed` | `0` | SYSTEMINFO | Use fixed-rate Pmove (avoids framerate-dependent physics). Broadcast to clients. |
+| `pmove_msec` | `8` | SYSTEMINFO | Milliseconds per Pmove step when `pmove_fixed` is 1. Broadcast to clients. |
+| `g_synchronousClients` | `0` | SYSTEMINFO | Force clients to simulate in lockstep with the server. |
+| `g_smoothClients` | `1` | (none) | Smooth client positions between snapshots. |
+
+### Internals
+
+| CVar | Default | Flags | Description |
+|---|---|---|---|
+| `sv_cheats` | `""` | (none) | Cheat protection. Set to 1 by `devmap`. Game reads this but does not set it. |
+| `g_restarted` | `0` | ROM | Set to 1 during map restart, cleared afterward. |
+| `g_podiumDist` | `80` | (none) | Distance between podium models at match end. |
+| `g_podiumDrop` | `70` | (none) | Vertical drop between podium tiers. |
+| `g_rankings` | `0` | (none) | Enable global ranking system integration. |
+
+## Registering custom CVars
+
+To add a CVar in your mod, add an entry to `gameCvarTable[]` in `g_main.c`:
+
+```c
+// In g_main.c — add to the vmCvar_t declarations:
+vmCvar_t  g_myOption;
+
+// Add to gameCvarTable[]:
+{ &g_myOption, "g_myOption", "1", CVAR_ARCHIVE, 0, qtrue },
+```
+
+The `trackChange` field (`qtrue` in the last column) causes the game to broadcast a message to all clients when the CVar changes. CVars registered here are automatically updated each frame by `G_UpdateCvars`.
