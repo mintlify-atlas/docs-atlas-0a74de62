@@ -1,0 +1,162 @@
+{
+  "projectType": "general",
+  "projectName": "Quake III Arena",
+  "projectDescription": "The GPL source release of the Quake III Arena game engine, including the renderer, game logic, bot AI, client/server networking, QVM virtual machine, and tools like Q3Radiant and q3map.",
+  "theme": "aspen",
+  "primaryColor": "#C75000",
+  "lightColor": "#FF7A2F",
+  "darkColor": "#8B3000",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Overview",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart-building",
+              "repository-layout"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/engine-modules",
+              "architecture/qvm-virtual-machine",
+              "architecture/client-server"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Engine",
+        "groups": [
+          {
+            "group": "Renderer",
+            "pages": [
+              "engine/renderer/overview",
+              "engine/renderer/shaders",
+              "engine/renderer/bsp-world",
+              "engine/renderer/models"
+            ]
+          },
+          {
+            "group": "Game Logic",
+            "pages": [
+              "engine/game/overview",
+              "engine/game/entities",
+              "engine/game/player-movement",
+              "engine/game/weapons",
+              "engine/game/game-types"
+            ]
+          },
+          {
+            "group": "Client Game",
+            "pages": [
+              "engine/cgame/overview",
+              "engine/cgame/hud-and-ui",
+              "engine/cgame/effects-and-particles"
+            ]
+          },
+          {
+            "group": "Networking",
+            "pages": [
+              "engine/networking/overview",
+              "engine/networking/server",
+              "engine/networking/client",
+              "engine/networking/snapshots"
+            ]
+          },
+          {
+            "group": "Bot AI",
+            "pages": [
+              "engine/botai/overview",
+              "engine/botai/aas-system",
+              "engine/botai/bot-behaviors"
+            ]
+          },
+          {
+            "group": "Common Systems",
+            "pages": [
+              "engine/common/cvar-system",
+              "engine/common/filesystem",
+              "engine/common/console-commands",
+              "engine/common/sound"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Tools",
+        "groups": [
+          {
+            "group": "Compilers & Tools",
+            "pages": [
+              "tools/overview",
+              "tools/q3asm",
+              "tools/lcc-compiler",
+              "tools/q3map",
+              "tools/q3radiant"
+            ]
+          },
+          {
+            "group": "Building",
+            "pages": [
+              "building/windows",
+              "building/linux",
+              "building/macos",
+              "building/compiling-qvms"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Modding",
+        "groups": [
+          {
+            "group": "Mod Development",
+            "pages": [
+              "modding/introduction",
+              "modding/qvm-mods",
+              "modding/game-module",
+              "modding/cgame-module",
+              "modding/ui-module"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "modding/cvars-reference",
+              "modding/console-commands-reference",
+              "modding/entity-reference"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "OpenGL hardware-accelerated 3D renderer with BSP worlds and dynamic lighting",
+    "QVM (Quake Virtual Machine) bytecode system for sandboxed game logic",
+    "Client-server architecture with delta-compressed snapshot networking",
+    "Botlib AI system with AAS (Area Awareness System) pathfinding",
+    "Multiple game types: FFA, Tournament, Team Deathmatch, CTF, and more",
+    "Q3Radiant map editor and q3map BSP compiler toolchain",
+    "LCC retargetable C compiler producing QVM bytecode",
+    "Cross-platform support: Windows, GNU/Linux, and macOS"
+  ],
+  "publicApiSurface": [
+    "refexport_t — Renderer module export API (tr_public.h)",
+    "refimport_t — Renderer module import API (tr_public.h)",
+    "gameExport_t — Game module export API (g_public.h)",
+    "gameImport_t — Game module import API (g_public.h)",
+    "cgameExport_t — Client game module export API (cg_public.h)",
+    "Pmove() — Player movement simulation (bg_public.h)",
+    "VM_Call() — QVM system call interface (vm_local.h)",
+    "Cvar_Set/Get — Console variable system (qcommon.h)",
+    "FS_ReadFile/WriteFile — Virtual filesystem API (qcommon.h)",
+    "MSG_Write*/MSG_Read* — Network message serialization (qcommon.h)"
+  ]
+}
